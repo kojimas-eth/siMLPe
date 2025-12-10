@@ -97,8 +97,8 @@ JOINT_NAMES = {
     10: "LSite (Toes)",       # Often unused
     11: "Spine (Low)",        # Often unused
     12: "Spine (Torso)",
-    13: "Neck",
-    14: "Head (Nose/Jaw)",
+    13: "Neck, Thorax",
+    14: "Head (Nose/Jaw) (Neck/nose)",
     15: "Site (Head Top)",
     16: "LCollar",            # Often unused
     17: "LShoulder",
@@ -149,12 +149,12 @@ def compute_mpjpe(predicted, ground_truth):
     ground_truth: numpy array of shape (Num_Frames, 22, 3)
     Calculates the error of joints at specific indices only.
     """
-    # print(f"predicted shape: {predicted.shape}, ground_truth shape: {ground_truth.shape}")
+    print(f"predicted shape: {predicted.shape}, ground_truth shape: {ground_truth.shape}")
     assert predicted.shape == ground_truth.shape, "Shape mismatch between predicted and ground truth"
     
     # Compute Euclidean distances per joint per frame
     diffs = predicted - ground_truth
-    dists = np.linalg.norm(diffs, axis=-1)  # Shape: (Num_Frames, 13)
+    dists = np.linalg.norm(diffs, axis=-1)  # Shape: (22, 13)
     
     # Average over all joints and frames
     mpjpe = np.mean(dists)
@@ -262,11 +262,11 @@ def plot_trajectory_h36m(vis_input, vis_target, vis_pred,highlight_frame=24):
     ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.05, 0.8), borderaxespad=0.)
     plt.show()
 
-def plot_trajectory_zed(vis_input, vis_target, vis_pred,highlight_frame=24):
+def plot_trajectory_zed(vis_input, vis_target, vis_pred,plot_length=10, highlight_frame=10):
     fig = plt.figure(figsize=(14,8))
     ax = fig.add_subplot(projection='3d')
     error_summary = []
-    # Plot Input Trajectory
+    # # Plot Input Trajectory
     for frame in range(vis_input.shape[0]):
         xs = vis_input[frame,:,0]
         ys = vis_input[frame,:,2] #flip
@@ -279,19 +279,19 @@ def plot_trajectory_zed(vis_input, vis_target, vis_pred,highlight_frame=24):
                 ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color='blue', alpha=0.1,linewidth=0.5)
         
     # # Plot Target Trajectory
-    # for frame in range(vis_target.shape[0]):
-    #     xs = vis_target[frame,:,0]
-    #     ys = vis_target[frame,:,2]
-    #     zs = vis_target[frame,:,1]
+    for frame in range(plot_length+1):
+        xs = vis_target[frame,:,0]
+        ys = vis_target[frame,:,2]
+        zs = vis_target[frame,:,1]
 
-    #     for p1, p2 in SKELETON_EDGES_22:
-    #         if frame == highlight_frame:
-    #             ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color='green', alpha=0.5, linewidth=1)
-    #         else:
-    #             ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color='green', alpha=0.1,linewidth=0.5)
+        for p1, p2 in SKELETON_EDGES_22:
+            if frame == highlight_frame:
+                ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color='green', alpha=0.5, linewidth=1)
+            else:
+                ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color='green', alpha=0.1,linewidth=0.5)
 
     # Plot Predicted Trajectory
-    for frame in range(vis_pred.shape[0]):
+    for frame in range(plot_length+1):
         xs = vis_pred[frame,:,0]
         ys = vis_pred[frame,:,2]
         zs = vis_pred[frame,:,1]
@@ -302,15 +302,18 @@ def plot_trajectory_zed(vis_input, vis_target, vis_pred,highlight_frame=24):
             else:
                 ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color='red', alpha=0.1,linewidth=0.5)
 
-    # for err_frame in frames_to_compute_error:
-    #         mpjpe = compute_mpjpe(vis_pred[err_frame], vis_target[err_frame])
-    #         error_summary.append(f"T+{err_frame+1}: {mpjpe:.2f}m")
+    for err_frame in frames_to_compute_error:
+            mpjpe = compute_mpjpe(vis_pred[err_frame], vis_target[err_frame])
+            error_summary.append(f"T+{err_frame+1}: {mpjpe:.2f}m")
 
     ax.legend()
     ax.set_xlabel('X (Lateral)')
     ax.set_ylabel('Y (Depth)')
     ax.set_zlabel('Z (Height)')
-    ax.set_title(f'Studying frame {sample}')
+    if root:
+        ax.set_title(f'Studying frame {sample} with bodies zeroed')
+    else:
+        ax.set_title(f'Studying frame {sample} with displacement interpolated')
 
     legend_elements = [
     Line2D([0], [0], color='blue', lw=2, label='Past Frame (History)'),
@@ -328,37 +331,102 @@ def plot_trajectory_zed(vis_input, vis_target, vis_pred,highlight_frame=24):
     ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.05, 0.8), borderaxespad=0.)
     plt.show()
 
+def plot_entire_sequence(input,frames_to_plot):
+    fig = plt.figure(figsize=(14,8))
+    ax = fig.add_subplot(projection='3d')
+    start = frames_to_plot[0]
+    stop = frames_to_plot[1] + 1
+    num_frames = stop-start
+    label_joint_idx = 21 #RHand
+    # Plot Input Trajectory
+    for i, time in enumerate( range(start,stop)):
+        color = plt.cm.coolwarm(i / num_frames)
+        vis_input = input[time]
+
+        xs = vis_input[-1,:,0]
+        ys = vis_input[-1,:,2] #flip
+        zs = vis_input[-1,:,1]
+
+        for p1, p2 in SKELETON_EDGES_22:
+            ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color=color, alpha=0.9,linewidth=0.5)
+            # if time%10 == 0:
+            #     ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color='red', alpha=0.4, linewidth=1)
+            # else:
+            #     ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color=color, alpha=0.5,linewidth=0.5)
+        
+        ax.text(xs[label_joint_idx], ys[label_joint_idx], zs[label_joint_idx] + 0.05, 
+                str(time), color='black', fontsize=8)
+        
+    ax.legend()
+    ax.set_xlabel('X (Lateral)')
+    ax.set_ylabel('Y (Depth)')
+    ax.set_zlabel('Z (Height)')
+    if root:
+        ax.set_title(f'Studying frames {start} to {stop-1} with bodies zeroed')
+    else:
+        ax.set_title(f'Studying frames {start} to {stop-1} with displacement interpolated')
+
+    legend_elements = [
+    Line2D([0], [0], color='blue', lw=2, label='Past Frame (History)')]
+ 
+    # Add the legend to the plot
+    ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.05, 0.8), borderaxespad=0.)
+    plt.show()
+
 ##################################
 # MAIN CODE
 ##################################
-zed = True
-data = np.load("zed_inference_results.npz")
+zed = True #If using data from zed inference
+root = True #If using data with everything zeroed
+
+if zed:
+    data = np.load("zed_inference_results.npz")
+    print(f"Loaded {len(data['inputs'])} samples from zed_inference_results.npz")
+else:
+    data = np.load("results_dump.npz")
+    print(f"Loaded {len(data['inputs'])} samples from results_dump.npz")
+
+
+sample = 100  # Which sample to visualize
+frames_to_compute_error = [0, 3, 5, 9]
+
 
 # Extract arrays
 if zed:
     inputs = data['inputs']   # (N, 50, 22, 3)
     preds = data['preds']     # (N, 25, 22, 3)
-    targets = 0
+    targets = inputs[sample+25, -25:, :, :]  # (25, 22, 3)
+    vis_target = targets
+
+    zero_input = data['zero_input']   # (N, 50, 22, 3)
+    zero_output = data['zero_output'] # (N, 25, 22, 3)
+    zero_target = zero_input[sample+25, -25:, :, :]  # (25, 22, 3)
+
 else:
     inputs = data['inputs']   # (3840, 50, 32, 3)
     targets = data['targets'] # (N, 25, 32, 3)
     preds = data['preds']     # (N, 25, 32, 3)
+    
+    vis_target= targets[sample] # (25, 32, 3)
 
 
-print(inputs.shape)
-print(preds.shape)
-sample = 1
+
 input_time = inputs.shape[1]
 pred_time = preds.shape[1]
 num_joints = inputs.shape[2]
 
+if root:
+    vis_input= zero_input[sample]   # (50, 22, 3)
+    vis_pred= zero_output[sample]     # (25, 22, 3  )
+    vis_target = zero_target
+else:
+    vis_input=  inputs[sample]   # (50, 32, 3)
+    vis_pred= preds[sample]     # (25, 32, 3)
 
-vis_input=  inputs[sample]   # (50, 32, 3)
-# vis_target= targets[sample] # (25, 32, 3)
-vis_target =0
-vis_pred= preds[sample]     # (25, 32, 3)
-frames_to_compute_error = [0, 4, 9, 14, 19, 24]
-print(vis_input.shape)
+
+
+plot_entire_sequence(zero_input, [max(0,sample), min(sample +15, len(zero_input)-1)])   
+plot_trajectory_zed(vis_input,vis_target,vis_pred,plot_length=10, highlight_frame=3)
+
+# plot_trajectory_h36m(vis_input, vis_target, vis_pred)
 # plot_single_skeleton_zed(vis_input)
-plot_trajectory_zed(vis_input, vis_target, vis_pred)    
-# plot_single_skeleton(vis_input, vis_target, vis_pred)

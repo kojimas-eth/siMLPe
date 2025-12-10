@@ -31,14 +31,25 @@ idct_m = torch.tensor(idct_m).float().cuda().unsqueeze(0)
 def regress_pred(model, pbar, num_samples, joint_used_xyz, m_p3d_h36):
     joint_to_ignore = np.array([16, 20, 23, 24, 28, 31]).astype(np.int64)
     joint_equal = np.array([13, 19, 22, 13, 27, 30]).astype(np.int64)
+    all_inputs = []
+    all_targets = []
+    all_preds = []
 
     for (motion_input, motion_target) in pbar:
         motion_input = motion_input.cuda()
+        #save inputs
+        input_cpu = motion_input.clone().cpu().numpy() 
+        all_inputs.append(input_cpu)
+
         b,n,c,_ = motion_input.shape
         num_samples += b
-
+        
+        #save targets
+        target_cpu = motion_target.clone().cpu().numpy()
+        all_targets.append(target_cpu)
+        
         motion_input = motion_input.reshape(b, n, 32, 3)
-        motion_input = motion_input[:, :, joint_used_xyz].reshape(b, n, -1)
+        motion_input = motion_input[:, :, joint_used_xyz].reshape(b, n, -1) #([128,50,66])
         outputs = []
         step = config.motion.h36m_target_length_train
         if step == 25:
@@ -77,22 +88,33 @@ def regress_pred(model, pbar, num_samples, joint_used_xyz, m_p3d_h36):
         tmp[:, :, joint_used_xyz] = motion_pred[:, :, joint_used_xyz]
         motion_pred = tmp
         motion_pred[:, :, joint_to_ignore] = motion_pred[:, :, joint_equal]
+        #save prediction
+        all_preds.append(motion_pred.cpu().numpy())
 
         mpjpe_p3d_h36 = torch.sum(torch.mean(torch.norm(motion_pred*1000 - motion_gt*1000, dim=3), dim=2), dim=0)
         m_p3d_h36 += mpjpe_p3d_h36.cpu().numpy()
     m_p3d_h36 = m_p3d_h36 / num_samples
-    return m_p3d_h36
+    return m_p3d_h36, np.concatenate(all_inputs), np.concatenate(all_targets), np.concatenate(all_preds)
 
 def test(config, model, dataloader) :
 
     m_p3d_h36 = np.zeros([config.motion.h36m_target_length])
     titles = np.array(range(config.motion.h36m_target_length)) + 1
+    
     joint_used_xyz = np.array([2,3,4,5,7,8,9,10,12,13,14,15,17,18,19,21,22,25,26,27,29,30]).astype(np.int64)
     num_samples = 0
 
     pbar = dataloader
-    m_p3d_h36 = regress_pred(model, pbar, num_samples, joint_used_xyz, m_p3d_h36)
+    m_p3d_h36, saved_inputs, saved_targets, saved_preds = regress_pred(model, pbar, num_samples, joint_used_xyz, m_p3d_h36)
 
+    # --- SAVE TO FILE ---
+    save_path = "results_dump.npz"
+    print(f"Saving inputs, targets, and preds to {save_path}...")
+    np.savez(save_path, 
+             inputs=saved_inputs,   # Shape: (Total_Samples, 50, 32, 3)
+             targets=saved_targets, # Shape: (Total_Samples, 25, 32, 3)
+             preds=saved_preds      # Shape: (Total_Samples, 25, 32, 3)
+             )
     ret = {}
     for j in range(config.motion.h36m_target_length):
         ret["#{:d}".format(titles[j])] = [m_p3d_h36[j], m_p3d_h36[j]]
@@ -101,13 +123,21 @@ def test(config, model, dataloader) :
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    parser.add_argument('--model-pth', type=str, default=None, help='=encoder path')
+    parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/checkpoints/h36m_model_35000.pth", help='=encoder path')
     args = parser.parse_args()
 
     model = Model(config)
 
-    state_dict = torch.load(args.model_pth)
-    model.load_state_dict(state_dict, strict=True)
+    
+    state_dict = torch.load(args.model_pth, weights_only=True, map_location="cpu")
+    converted_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("motion_transformer.transformer"):
+            new_k = k.replace("motion_transformer.transformer", "motion_mlp.mlps")
+            converted_state_dict[new_k] = v
+        else:
+            converted_state_dict[k] = v
+    model.load_state_dict(converted_state_dict, strict=True)
     model.eval()
     model.cuda()
 
