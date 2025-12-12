@@ -9,12 +9,9 @@ import numpy as np
 from config  import config
 from model import siMLPe as Model
 
-joint_used_xyz = np.array([2,3,4,5,7,8,9,10,12,13,14,15,17,18,19,21,22,25,26,27,29,30]).astype(np.int64)
+from datasets.h36m_eval import H36MEval
 
-def load_zed_data(file_path):
-    import numpy as np
-    data = np.load(file_path)
-    return data['inputs'], data['targets']
+joint_used_xyz = np.array([2,3,4,5,7,8,9,10,12,13,14,15,17,18,19,21,22,25,26,27,29,30]).astype(np.int64)
 
 
 def get_dct_matrix(N):
@@ -48,15 +45,19 @@ def zed34_to_h36m32(zed_data):
     h36m_data[:, 1, :] = zed_data[:, 22 ,:]  # R Hip
     h36m_data[:, 2, :] = zed_data[:, 23, :]  # R Knee
     h36m_data[:, 3, :] = zed_data[:, 24, :]  # R Ankle
-    h36m_data[:, 4, :] = zed_data[:, 25, :]  # R sites
-   
-    #approx the toe location
-    r_heel = zed_data[:, 25, :] - zed_data[:, 33, :] 
-    r_vec_ankle_toe_dir = -r_heel
-    r_norm = np.linalg.norm(r_vec_ankle_toe_dir) + 1e-6
-    r_unit_vec = r_vec_ankle_toe_dir / r_norm
+    h36m_data[:, 4, :] = zed_data[:, 25, :]  # R toe base
 
-    h36m_data[:, 5, :] = zed_data[:, 25, :] + r_unit_vec *1.5  # R toes
+
+    r_ankle = zed_data[:, 24, :]
+    r_heel  = zed_data[:, 33, :]
+    r_vec = r_ankle - r_heel
+    r_vec[:, 1] = 0 
+
+    r_norm = np.linalg.norm(r_vec, axis=1, keepdims=True) + 1e-6
+    r_dir_flat = r_vec / r_norm
+    r_toe = r_ankle + (r_dir_flat * 0.15)
+    r_toe[:, 1] = r_heel[:, 1] 
+    h36m_data[:, 5, :] = r_toe
 
     
     # --- LEFT LEG ---
@@ -65,20 +66,35 @@ def zed34_to_h36m32(zed_data):
     h36m_data[:, 8, :] = zed_data[:, 20, :]  # L Ankle
     h36m_data[:, 9, :] = zed_data[:, 21, :]  # L sites
     
-    #approx the toe location
-    l_heel = zed_data[:, 21, :] - zed_data[:, 32, :] 
-    l_vec_ankle_toe_dir = -l_heel
-    l_norm = np.linalg.norm(l_vec_ankle_toe_dir) + 1e-6
-    l_unit_vec = l_vec_ankle_toe_dir / l_norm
-    h36m_data[:, 10, :] = zed_data[:, 21, :] + l_unit_vec *1.5 # L toes
+    l_ankle = zed_data[:, 20, :]
+    l_heel  = zed_data[:, 32, :]
+    l_vec = l_ankle - l_heel
+    l_vec[:, 1] = 0 
 
-    
+    l_norm = np.linalg.norm(l_vec, axis=1, keepdims=True) + 1e-6
+    l_dir_flat = l_vec / l_norm
+    l_toe = l_ankle + (l_dir_flat * 0.15)
+    l_toe[:, 1] = l_heel[:, 1] 
+
+    h36m_data[:, 10, :] = l_toe
+
     # --- SPINE & HEAD ---
     h36m_data[:, 11, :] = zed_data[:, 1, :]  # Spine Navel -> Spine Low
-    h36m_data[:, 12, :] = zed_data[:, 2, :]  # Spine Chest -> Spine Torso
+    h36m_data[:, 12, :] = zed_data[:, 1, :]  # Spine Chest -> Spine Torso
     h36m_data[:, 13, :] = zed_data[:, 3, :]  # Neck -> Neck
-    h36m_data[:, 14, :] = zed_data[:, 26, :] # Head -> Head (Nose/Jaw)
-    h36m_data[:, 15, :] = zed_data[:, 27, :] # Nose -> Site (Head Top approximate)
+    h36m_data[:, 14, :] = zed_data[:, 27, :] # Head -> Head (Nose/Jaw)
+    h36m_data[:, 15, :] = (zed_data[:, 30, :] + zed_data[:,28,:])/2 # Nose -> Site (Head Top approximate)
+    
+    eye_midpoint = (zed_data[:, 30, :] + zed_data[:, 28, :]) / 2
+    neck_pos = zed_data[:, 3, :] # You need to verify your Neck index!
+    vec_neck_to_eyes = eye_midpoint - neck_pos
+
+    head_up_norm = np.linalg.norm(vec_neck_to_eyes, axis=1, keepdims=True) + 1e-6
+    head_up_dir = vec_neck_to_eyes / head_up_norm
+
+    # 4. Extrapolate to Head Top
+    FOREHEAD_HEIGHT = 0.12 
+    h36m_data[:, 15, :] = eye_midpoint + (head_up_dir * FOREHEAD_HEIGHT)
 
     # --- LEFT ARM ---
     h36m_data[:, 16, :] = zed_data[:, 4, :]  # L Clavicle
@@ -97,10 +113,89 @@ def zed34_to_h36m32(zed_data):
     h36m_data[:, 27, :] = zed_data[:, 14, :] # R Wrist
     h36m_data[:, 28, :] = zed_data[:, 17, :] # R Wrist
     h36m_data[:, 29, :] = zed_data[:, 15, :] # R Hand (Palm)
-    h36m_data[:, 30, :] = zed_data[:, 16, :] # R Wrist
+    h36m_data[:, 30, :] = zed_data[:, 16, :] # 
     h36m_data[:, 31, :] = zed_data[:, 16, :]
     return h36m_data
 
+def zed34_to_h36m32_flip(zed_data):
+    """
+    Converts ZED BODY_34 format to Human3.6M 32-joint format.
+    FLIPPED VERSION: Swaps Left <-> Right inputs from ZED.
+    
+    Args:
+        zed_data: Numpy array of shape (Frames, 34, 3) 
+                  
+    Returns:
+        h36m_data: Numpy array of shape (Frames, 32, 3)
+    """
+    frames = zed_data.shape[0]
+    h36m_data = np.zeros((frames, 32, 3))
+
+    # --- CENTER BODY (Root) ---
+    h36m_data[:, 0, :] = zed_data[:, 0, :]   # Pelvis -> Hip (Root)
+
+    # --- RIGHT LEG (Now using ZED LEFT indices) ---
+    # ZED Left Leg indices: 18 (Hip), 19 (Knee), 20 (Ankle), 21 (Heel/Site)
+    h36m_data[:, 1, :] = zed_data[:, 18 ,:]  # R Hip <- ZED Left Hip
+    h36m_data[:, 2, :] = zed_data[:, 19, :]  # R Knee <- ZED Left Knee
+    h36m_data[:, 3, :] = zed_data[:, 20, :]  # R Ankle <- ZED Left Ankle
+    h36m_data[:, 4, :] = zed_data[:, 21, :]  # R sites <- ZED Left Heel
+   
+    # Approx the toe location (Calculated from ZED Left side 21 & 32)
+    # ZED Index 32 is Left Toe Tip, 21 is Left Heel
+    r_heel = zed_data[:, 21, :] - zed_data[:, 32, :] 
+    r_vec_ankle_toe_dir = -r_heel
+    r_norm = np.linalg.norm(r_vec_ankle_toe_dir, axis=1, keepdims=True) + 1e-6
+    r_unit_vec = r_vec_ankle_toe_dir / r_norm
+
+    # h36m_data[:, 5, :] = zed_data[:, 21, :] + r_unit_vec * 1.5  # R toes
+    h36m_data[:, 5, :] = zed_data[:, 21, :]    
+    # --- LEFT LEG (Now using ZED RIGHT indices) ---
+    # ZED Right Leg indices: 22 (Hip), 23 (Knee), 24 (Ankle), 25 (Heel/Site)
+    h36m_data[:, 6, :] = zed_data[:, 22, :]  # L Hip <- ZED Right Hip
+    h36m_data[:, 7, :] = zed_data[:, 23, :]  # L Knee <- ZED Right Knee
+    h36m_data[:, 8, :] = zed_data[:, 24, :]  # L Ankle <- ZED Right Ankle
+    h36m_data[:, 9, :] = zed_data[:, 25, :]  # L sites <- ZED Right Heel
+    
+    # Approx the toe location (Calculated from ZED Right side 25 & 33)
+    # ZED Index 33 is Right Toe Tip, 25 is Right Heel
+    l_heel = zed_data[:, 25, :] - zed_data[:, 33, :] 
+    l_vec_ankle_toe_dir = -l_heel
+    l_norm = np.linalg.norm(l_vec_ankle_toe_dir, axis=1, keepdims=True) + 1e-6
+    l_unit_vec = l_vec_ankle_toe_dir / l_norm
+    # h36m_data[:, 10, :] = zed_data[:, 25, :] + l_unit_vec * 1.5 # L toes
+    h36m_data[:, 10, :] = zed_data[:, 25, :]
+    
+    # --- SPINE & HEAD (Unchanged) ---
+    h36m_data[:, 11, :] = zed_data[:, 1, :]  # Spine Navel -> Spine Low
+    h36m_data[:, 12, :] = zed_data[:, 2, :]  # Spine Chest -> Spine Torso
+    h36m_data[:, 13, :] = zed_data[:, 3, :]  # Neck -> Neck
+    h36m_data[:, 14, :] = zed_data[:, 26, :] # Head -> Head (Nose/Jaw)
+    h36m_data[:, 15, :] = zed_data[:, 27, :] # Nose -> Site (Head Top approximate)
+
+    # --- LEFT ARM (Now using ZED RIGHT indices) ---
+    # ZED Right Arm indices: 11-17
+    h36m_data[:, 16, :] = zed_data[:, 11, :]  # L Clavicle <- ZED Right Clavicle
+    h36m_data[:, 17, :] = zed_data[:, 12, :]  # L Shoulder <- ZED Right Shoulder
+    h36m_data[:, 18, :] = zed_data[:, 13, :]  # L Elbow <- ZED Right Elbow
+    h36m_data[:, 19, :] = zed_data[:, 14, :]  # L Wrist <- ZED Right Wrist
+    h36m_data[:, 20, :] = zed_data[:, 17, :]  # L Thumb <- ZED Right Thumb
+    h36m_data[:, 21, :] = zed_data[:, 15, :]  # L Hand (Palm) <- ZED Right Hand
+    h36m_data[:, 22, :] = zed_data[:, 16, :]  # L Finger <- ZED Right Finger (Tip)
+    h36m_data[:, 23, :] = zed_data[:, 16, :]  # L Tip <- ZED Right Finger (Tip)
+
+    # --- RIGHT ARM (Now using ZED LEFT indices) ---
+    # ZED Left Arm indices: 4-10
+    h36m_data[:, 24, :] = zed_data[:, 4, :]   # R Clavicle <- ZED Left Clavicle
+    h36m_data[:, 25, :] = zed_data[:, 5, :]   # R Shoulder <- ZED Left Shoulder
+    h36m_data[:, 26, :] = zed_data[:, 6, :]   # R Elbow <- ZED Left Elbow
+    h36m_data[:, 27, :] = zed_data[:, 7, :]   # R Wrist <- ZED Left Wrist
+    h36m_data[:, 28, :] = zed_data[:, 10, :]  # R Thumb <- ZED Left Thumb
+    h36m_data[:, 29, :] = zed_data[:, 8, :]   # R Hand (Palm) <- ZED Left Hand
+    h36m_data[:, 30, :] = zed_data[:, 9, :]   # R Finger <- ZED Left Finger (Tip)
+    h36m_data[:, 31, :] = zed_data[:, 9, :]   # R Tip <- ZED Left Finger (Tip)
+
+    return h36m_data
 ############################
 #Load Model
 ###########################
@@ -130,10 +225,13 @@ idct_m = torch.tensor(idct_m_np).float().cuda().unsqueeze(0)
 ############################
 #Load ZED data
 ###########################
-source = "/home/sosuke/thesis/siMLPe/data/zed_data/30fps_body34_fast_3.json"
+source_number = 2
+source = f"/home/sosuke/thesis/siMLPe/data/zed_data/30fps_body34_fast_{source_number}.json"
 if source.endswith('.json') or source.endswith('.jsonl'):
     with open(source, 'r') as file:
         data = json.load(file)
+
+
 
 all_inputs_saved = []
 all_preds_saved = []
@@ -187,7 +285,7 @@ for timestamp_key, frame_data in data.items():
         if not glitch:
             history_buffer.append(keypoints_array)
         else:
-            history_buffer.append(prev_frame)         
+            history_buffer.append(prev_frame)          
 
         
         if len(history_buffer)> 50:
@@ -196,6 +294,23 @@ for timestamp_key, frame_data in data.items():
         if len(history_buffer) == 50:
             past_frames = np.array(history_buffer) #(50,34,3)
             h36m_order_converted = zed34_to_h36m32(past_frames)  #(50,32,3)
+
+            # # --- COORDINATE SYSTEM FIX (Y-Up -> Z-Up) ---
+            # h36m_rotated = h36m_order_converted.copy()
+
+            # # 1. Keep X the same
+            # h36m_rotated[:, :, 0] = h36m_order_converted[:, :, 0]
+
+            # # 2. Map ZED Depth (-Z) to H36M Depth (Y)
+            # # ZED is usually -Z forward. H36M is +Y forward.
+            # h36m_rotated[:, :, 1] = -h36m_order_converted[:, :, 2] 
+
+            # # 3. Map ZED Height (Y) to H36M Height (Z)
+            # h36m_rotated[:, :, 2] = h36m_order_converted[:, :, 1]
+
+
+            # # Update the variable flow
+            # h36m_order_converted = h36m_rotated
             
             root = h36m_order_converted[:, 0:1, :]
             h36m_rooted = h36m_order_converted - root
@@ -206,67 +321,6 @@ for timestamp_key, frame_data in data.items():
             all_inputs_saved.append(h36m_order_converted[:, joint_used_xyz, :])
             zeroed_input.append(input_22)
             
-            # step = config.motion.h36m_target_length_train #In our case 10
-            # outputs = []
-            # if step == 25:
-            #     num_step = 1
-            # else:
-            #     num_step = 25 // step + 1
-            
-            # for idx in range(num_step):
-            #     with torch.no_grad():
-            #         input_tensor = torch.tensor(input_22).float().cuda()
-            #         input_tensor = input_tensor.reshape(1, 50, -1) #(1, 50, 66)
-                    
-            #         if config.deriv_input:
-            #             motion_input = input_tensor.clone()
-            #             motion_input = torch.matmul(dct_m[:, :, :config.motion.h36m_input_length], input_tensor)
-            #         else:
-            #             motion_input = input_tensor.clone()
-                    
-            #         #Predict in DCT space
-            #         output = model(motion_input)
-
-            #         #Apply the inverse DCT
-            #         output = torch.matmul(idct_m[:, :config.motion.h36m_input_length, :], output)[:, :step, :]
-            #         if config.deriv_output:
-            #             output = output + motion_input[:, -1:, :].repeat(1,step,1)
-
-            #     output = output.reshape(-1, 22*3)
-            #     output = output.reshape(1,step,-1)
-            #     outputs.append(output)
-            #     motion_input = torch.cat([motion_input[:, step:], output], axis=1)
-            # motion_pred= torch.cat(outputs, axis=1)[:,:25]
-            # motion_pred = motion_pred.cpu().numpy().reshape(25, 22, 3)
-            # # print("shape of motion_pred is " ,motion_pred.shape)
-
-            # # 1. Calculate the Linear Velocity of the root from the history by taking average
-            # last_root_pos = root[-1, 0, :] # XYZ of root at frame 50
-            # prev_root_pos = root[-20, 0, :] # XYZ of root at frame 30
-            # velocity = (last_root_pos - prev_root_pos) / 20.0 
-
-            # # 2. Project this velocity into the future (25 frames)
-            # future_roots = []
-            # for i in range(1, 26):
-            #     new_root = last_root_pos + (velocity * i)
-            #     future_roots.append(new_root)
-
-            # future_roots = np.array(future_roots) # Shape (25, 3)
-            # future_roots = future_roots[:, np.newaxis, :] # Shape (25, 1, 3)
-
-            # # 3. Add the global root back to the prediction
-            # # pred_numpy is (25, 22, 3). We broadcast add (25, 1, 3)
-            # pred_numpy = motion_pred + future_roots
-
-            # # Store Prediction
-            # all_preds_saved.append(pred_numpy)
-            
-
-            # # time.sleep(2)
-            # if len(all_preds_saved) % 50 == 0:
-            #     print(f"Predicted {len(all_preds_saved)} windows so far...")
-
-
 
 
             #--- INFERENCE  ---
@@ -332,14 +386,14 @@ print("Saving results to disk...")
 all_inputs_saved = np.array(all_inputs_saved) # Shape (N, 50, 22, 3)
 all_preds_saved = np.array(all_preds_saved)   # Shape (N, 25, 22, 3)
 
-np.savez("zed_inference_results.npz", 
+np.savez(f"zed_inference_results_{source_number}_norot_extrapolate.npz", 
          inputs=all_inputs_saved, 
          preds=all_preds_saved,
          zero_input = zeroed_input,
          zero_output = zeroed_outpout
          )
 
-print(f"Done! Saved {len(all_preds_saved)} samples to zed_inference_results.npz")
+print(f"Done! Saved {len(all_preds_saved)} samples to zed_inference_results.npz_{source_number}")
 
 
 

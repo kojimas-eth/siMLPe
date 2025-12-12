@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d import Axes3D 
+from matplotlib import animation as animation
 ''' Joint used xyz corresponnd to the following edges
 RKnee, RAnkle, RToe, RSite
 LKnee, LAnkle, LToe, LSite
@@ -13,12 +14,12 @@ SKELETON_EDGES_22 = [
     # --- Right Leg (Starts at Knee) ---
     (0, 1),   # RKnee -> RAnkle
     (1, 2),   # RAnkle -> RToe
-    (2, 3),   # RToe -> RTip (Optional, might be erratic)
+    (2, 3),   # RToe -> RTip 
 
     # --- Left Leg (Starts at Knee) ---
     (4, 5),   # LKnee -> LAnkle
     (5, 6),   # LAnkle -> LToe
-    (6, 7),   # LToe -> LTip (Optional)
+    (6, 7),   # LToe -> LTip 
 
     # --- Spine & Head ---
     (8, 9),   # Spine (Torso) -> Neck
@@ -75,8 +76,6 @@ H36M_FULL_EDGES = [
     # Spine
     (0, 12), (12, 13), (13, 14), (14, 15),
     
-    # Left Arm (Note: Collar connects Spine to Shoulder in some raw data, 
-    # but usually Neck->Shoulder is safer for visual)
     (13, 17), (17, 18), (18, 19), (19, 21), (21, 22), # Hand chain
     
     # Right Arm
@@ -88,34 +87,34 @@ JOINT_NAMES = {
     1:  "RHip",
     2:  "RKnee",
     3:  "RFoot (Ankle)",
-    4:  "RThumb (Site)",      # Often unused
-    5:  "RSite (Toes)",       # Often unused
+    4:  "RThumb (Site)",      
+    5:  "RSite (Toes)",      
     6:  "LHip",
     7:  "LKnee",
     8:  "LFoot (Ankle)",
-    9:  "LThumb (Site)",      # Often unused
-    10: "LSite (Toes)",       # Often unused
-    11: "Spine (Low)",        # Often unused
+    9:  "LThumb (Site)",      
+    10: "LSite (Toes)",       
+    11: "Spine (Low)",        
     12: "Spine (Torso)",
     13: "Neck, Thorax",
     14: "Head (Nose/Jaw) (Neck/nose)",
     15: "Site (Head Top)",
-    16: "LCollar",            # Often unused
+    16: "LCollar",            
     17: "LShoulder",
     18: "LElbow",
     19: "LWrist",
-    20: "LThumb",             # Often unused
+    20: "LThumb",             
     21: "LHand",
-    22: "LFinger",            # Often unused
-    23: "LTip",               # Often unused
-    24: "RCollar",            # Often unused
+    22: "LFinger",            
+    23: "LTip",               
+    24: "RCollar",            
     25: "RShoulder",
     26: "RElbow",
     27: "RWrist",
-    28: "RThumb",             # Often unused
+    28: "RThumb",             
     29: "RHand",
-    30: "RFinger",            # Often unused
-    31: "RTip"                # Often unused
+    30: "RFinger",            
+    31: "RTip"                
 }
 
 JOINT_NAMES_22 = {
@@ -130,17 +129,17 @@ JOINT_NAMES_22 = {
     8: "Spine (Torso)",
     9: "Neck",
     10: "Head (Nose/Jaw)",
-    11: "Site (Head Top)",           # Often unused
+    11: "Site (Head Top)",           
     12: "LShoulder",
     13: "LElbow",
-    14: "LWrist",           # Often unused
+    14: "LWrist",          
     15: "LHand",
-    16: "LFinger",            # Often unused
+    16: "LFinger",           
     17: "RShoulder",
     18: "RElbow",
-    19: "RWrist",         # Often unused
+    19: "RWrist",        
     20: "RHand",
-    21: "RFinger"           #
+    21: "RFinger"           
 }
 
 def compute_mpjpe(predicted, ground_truth):
@@ -149,7 +148,7 @@ def compute_mpjpe(predicted, ground_truth):
     ground_truth: numpy array of shape (Num_Frames, 22, 3)
     Calculates the error of joints at specific indices only.
     """
-    print(f"predicted shape: {predicted.shape}, ground_truth shape: {ground_truth.shape}")
+    # print(f"predicted shape: {predicted.shape}, ground_truth shape: {ground_truth.shape}")
     assert predicted.shape == ground_truth.shape, "Shape mismatch between predicted and ground truth"
     
     # Compute Euclidean distances per joint per frame
@@ -373,21 +372,146 @@ def plot_entire_sequence(input,frames_to_plot):
     ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.05, 0.8), borderaxespad=0.)
     plt.show()
 
+def plot_2d_trajectory(vis_input, vis_target, vis_pred):
+    x_gt = np.concatenate([vis_input[:,:,0], vis_target[:,:,0]], axis=0) 
+    y_gt = np.concatenate([vis_input[:,:,2], vis_target[:,:,2]], axis=0)
+    z_gt = np.concatenate([vis_input[:,:,1], vis_target[:,:,1]], axis=0)
+    x_pred = np.concatenate([vis_input[:,:,0], vis_pred[:,:,0]], axis=0)
+    y_pred = np.concatenate([vis_input[:,:,2], vis_pred[:,:,2]], axis=0)
+    z_pred = np.concatenate([vis_input[:,:,1], vis_pred[:,:,1]], axis=0)
+
+    total_frame = vis_input.shape[0] + vis_target.shape[0]
+    time = [x for x in range(total_frame)]
+    input_length = vis_input.shape[0]
+
+
+
+    fig , (ax1,ax2,ax3) = plt.subplots(3,1, figsize=(18,6), sharex=True)
+    for j in range(vis_input.shape[1]):
+        ax1.plot(time, x_gt[:, j], color='green', alpha=0.3, linewidth=1, label='GT' if j==0 else "")
+        ax1.plot(time[input_length-1:], x_pred[input_length-1:, j], color='red', linestyle='--', alpha=0.5, linewidth=1, label='Pred' if j==0 else "")
+
+        # --- Plot Y Coordinate ---
+        ax2.plot(time, y_gt[:, j], color='green', alpha=0.3, linewidth=1)
+        ax2.plot(time[input_length-1:], y_pred[input_length-1:, j], color='red', linestyle='--', alpha=0.5, linewidth=1)
+
+        # --- Plot Z Coordinate ---
+        ax3.plot(time, z_gt[:, j], color='green', alpha=0.3, linewidth=1)
+        ax3.plot(time[input_length-1:], z_pred[input_length-1:, j], color='red', linestyle='--', alpha=0.5, linewidth=1)
+
+    for ax, label in zip([ax1, ax2, ax3], ['X Coordinate', 'Y Coordinate', 'Z Coordinate']):
+            ax.axvline(x=input_length-1, color='black', linestyle=':', label='Start of Pred')
+            ax.set_ylabel(f'{label} value')
+            ax.grid(True, alpha=0.3)
+
+    ax1.legend(loc='upper right')
+    ax3.set_xlabel('Time (Frames)')
+    plt.suptitle(f'2D Joint Trajectories over Time at frame {sample}', fontsize=16)
+    plt.tight_layout()
+    plt.savefig(f"plots/{source_number}_2d_trajectory_plot_{sample}.png")
+    plt.show()
+        
+
+def animate_trajectory_zed(vis_input, vis_target, vis_pred, skeleton_edges, interval=100):
+    """
+    Creates a side-by-side 3D animation:
+    - Left: Ground Truth (Input -> Target)
+    - Right: Prediction (Input -> Prediction)
+    """
+    
+    # 1. Prepare Data
+    # Concatenate input with target/pred to create continuous sequences
+    # Input shape: (Frames, Joints, 3)
+    seq_gt = np.concatenate([vis_input, vis_target], axis=0)
+    seq_pred = np.concatenate([vis_input, vis_pred], axis=0)
+    
+    input_len = vis_input.shape[0]
+    total_frames = seq_gt.shape[0]
+
+    # 2. Setup Figure
+    fig = plt.figure(figsize=(16, 8))
+    ax1 = fig.add_subplot(1, 2, 1, projection='3d')
+    ax2 = fig.add_subplot(1, 2, 2, projection='3d')
+    
+    # Titles
+    ax1.set_title("Ground Truth (Blue=In, Green=Out)")
+    ax2.set_title("Prediction (Blue=In, Red=Out)")
+    
+    # 3. Helper to determine global axis limits (crucial for stable 3D animation)
+    all_data = np.concatenate([seq_gt, seq_pred], axis=0)
+    # Note: Using indices 0, 2, 1 based on your original flip logic (x, z, y)
+    x_min, x_max = all_data[:, :, 0].min(), all_data[:, :, 0].max()
+    y_min, y_max = all_data[:, :, 2].min(), all_data[:, :, 2].max() # Z in data is Y in plot
+    z_min, z_max = all_data[:, :, 1].min(), all_data[:, :, 1].max() # Y in data is Z in plot
+    
+    for ax in [ax1, ax2]:
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        ax.set_zlim(z_min, z_max)
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.view_init(elev=20, azim=45) # Optional: Set a nice camera angle
+
+    # 4. Initialize Line Objects
+    # We create a list of line objects for every edge in the skeleton
+    # This is much faster than calling plot() every frame
+    lines_gt = [ax1.plot([], [], [], linewidth=2)[0] for _ in skeleton_edges]
+    lines_pred = [ax2.plot([], [], [], linewidth=2)[0] for _ in skeleton_edges]
+
+    def update(frame):
+        # Determine current color based on phase (Input vs Output)
+        if frame < input_len:
+            color_gt = 'blue'
+            color_pred = 'blue'
+            phase = "Input"
+        else:
+            color_gt = 'green'
+            color_pred = 'red'
+            phase = "Future"
+
+        # Update Ground Truth Skeleton (Left)
+        current_pose_gt = seq_gt[frame]
+        for line, (p1, p2) in zip(lines_gt, skeleton_edges):
+            line.set_data([current_pose_gt[p1, 0], current_pose_gt[p2, 0]], 
+                          [current_pose_gt[p1, 2], current_pose_gt[p2, 2]]) # Swap Y/Z
+            line.set_3d_properties([current_pose_gt[p1, 1], current_pose_gt[p2, 1]])
+            line.set_color(color_gt)
+
+        # Update Prediction Skeleton (Right)
+        current_pose_pred = seq_pred[frame]
+        for line, (p1, p2) in zip(lines_pred, skeleton_edges):
+            line.set_data([current_pose_pred[p1, 0], current_pose_pred[p2, 0]], 
+                          [current_pose_pred[p1, 2], current_pose_pred[p2, 2]]) # Swap Y/Z
+            line.set_3d_properties([current_pose_pred[p1, 1], current_pose_pred[p2, 1]])
+            line.set_color(color_pred)
+            
+        fig.suptitle(f"Frame: {frame} ({phase})", fontsize=14)
+        return lines_gt + lines_pred
+
+    # 5. Create Animation
+    anim = animation.FuncAnimation(
+        fig, update, frames=total_frames, interval=interval, blit=False
+    )
+    anim.save(f'plots/new_{source_number}_skeleton_animation_{sample}.mp4', writer='ffmpeg', fps=10)
+    # anim.save(f'plots/{source_number}_original_source_{sample}.mp4', writer='ffmpeg', fps=10)
+
 ##################################
 # MAIN CODE
 ##################################
 zed = True #If using data from zed inference
 root = True #If using data with everything zeroed
+source_number = 2
+sample = 10 #which frame to analyze
 
 if zed:
-    data = np.load("zed_inference_results.npz")
-    print(f"Loaded {len(data['inputs'])} samples from zed_inference_results.npz")
+    data = np.load(f"zed_inference_results_{source_number}_norot_extrapolate.npz")
+    # data = np.load("sanity_check.npz")
+    print(f"Loaded {len(data['inputs'])} samples from zed_inference_results_{source_number}.npz")
 else:
     data = np.load("results_dump.npz")
     print(f"Loaded {len(data['inputs'])} samples from results_dump.npz")
 
-
-sample = 100  # Which sample to visualize
 frames_to_compute_error = [0, 3, 5, 9]
 
 
@@ -395,8 +519,10 @@ frames_to_compute_error = [0, 3, 5, 9]
 if zed:
     inputs = data['inputs']   # (N, 50, 22, 3)
     preds = data['preds']     # (N, 25, 22, 3)
-    targets = inputs[sample+25, -25:, :, :]  # (25, 22, 3)
-    vis_target = targets
+    # targets = inputs[sample+25, -25:, :, :]  # (25, 22, 3)
+    targets = preds
+    vis_target = targets[0]
+
 
     zero_input = data['zero_input']   # (N, 50, 22, 3)
     zero_output = data['zero_output'] # (N, 25, 22, 3)
@@ -423,10 +549,19 @@ else:
     vis_input=  inputs[sample]   # (50, 32, 3)
     vis_pred= preds[sample]     # (25, 32, 3)
 
-
-
-plot_entire_sequence(zero_input, [max(0,sample), min(sample +15, len(zero_input)-1)])   
+#only take frist 10 frames
 plot_trajectory_zed(vis_input,vis_target,vis_pred,plot_length=10, highlight_frame=3)
+vis_target = vis_target[0:10, :, :]
+vis_pred = vis_pred[0:10, :, :]
+# print(vis_input.shape, vis_target.shape, vis_pred.shape)
+
+plot_2d_trajectory(vis_input, vis_target, vis_pred)
+animate_trajectory_zed(vis_input, vis_target, vis_pred, SKELETON_EDGES_22)
+
+# plot_entire_sequence(zero_input, [max(0,sample), min(sample +15, len(zero_input)-1)])   
+
+
 
 # plot_trajectory_h36m(vis_input, vis_target, vis_pred)
+# animate_trajectory_zed(vis_input, vis_target, vis_pred, H36M_FULL_EDGES)
 # plot_single_skeleton_zed(vis_input)
