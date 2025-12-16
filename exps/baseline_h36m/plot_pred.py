@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d import Axes3D 
 from matplotlib import animation as animation
+import json
+
 ''' Joint used xyz corresponnd to the following edges
 RKnee, RAnkle, RToe, RSite
 LKnee, LAnkle, LToe, LSite
@@ -141,6 +143,48 @@ JOINT_NAMES_22 = {
     20: "RHand",
     21: "RFinger"           
 }
+SKELETON_EDGES_ZED_34 = [
+    # --- Spine (Center) ---
+    (0, 1),   # Pelvis -> Navel
+    (1, 2),   # Navel -> Chest
+    (2, 3),   # Chest -> Neck
+    (3, 26),  # Neck -> Head (Nose/Center)
+    
+    # --- Face (if available) ---
+    (26, 27), # Head -> Nose
+    (26, 28), (26, 30), # Nose -> Eyes
+    (26, 29), (26, 31), # Nose -> Ears
+
+    # --- Left Leg ---
+    (0, 18),  # Pelvis -> L_Hip
+    (18, 19), # L_Hip -> L_Knee
+    (19, 20), # L_Knee -> L_Ankle
+    (20, 32), # L_Ankle -> L_Heel (Optional)
+    (20, 21), # L_Ankle -> L_Toe (Optional)
+
+    # --- Right Leg ---
+    (0, 22),  # Pelvis -> R_Hip
+    (22, 23), # R_Hip -> R_Knee
+    (23, 24), # R_Knee -> R_Ankle
+    (24, 33), # R_Ankle -> R_Heel (Optional)
+    (24, 25), # R_Ankle -> R_Toe (Optional)
+
+    # --- Left Arm ---
+    (3, 4),   # Neck -> L_Clavicle
+    (4, 5),   # L_Clavicle -> L_Shoulder
+    (5, 6),   # L_Shoulder -> L_Elbow
+    (6, 7),   # L_Elbow -> L_Wrist
+    (7, 8),   # L_Wrist -> L_Hand
+    (8, 9), (8, 10), # Hand -> Tips/Thumb
+
+    # --- Right Arm ---
+    (3, 11),  # Neck -> R_Clavicle
+    (11, 12), # R_Clavicle -> R_Shoulder
+    (12, 13), # R_Shoulder -> R_Elbow
+    (13, 14), # R_Elbow -> R_Wrist
+    (14, 15), # R_Wrist -> R_Hand
+    (15, 16), (15, 17) # Hand -> Tips/Thumb
+]
 
 def compute_mpjpe(predicted, ground_truth):
     """
@@ -411,6 +455,78 @@ def plot_2d_trajectory(vis_input, vis_target, vis_pred):
     plt.savefig(f"plots/{source_number}_2d_trajectory_plot_{sample}.png")
     plt.show()
         
+def plot_2d_trajectory_separated(vis_input, vis_target, vis_pred, sample_id=0, save_path="plots"):
+    """
+    Creates a 22x3 grid of plots (Rows=Joints, Cols=X,Y,Z coordinates).
+    """
+# 1. Prepare Data
+    # Concatenate Input + Target/Pred for continuous lines
+    x_gt = np.concatenate([vis_input[:,:,0], vis_target[:,:,0]], axis=0) 
+    y_gt = np.concatenate([vis_input[:,:,2], vis_target[:,:,2]], axis=0) # Z-up adjustment if needed
+    z_gt = np.concatenate([vis_input[:,:,1], vis_target[:,:,1]], axis=0)
+    
+    x_pred = np.concatenate([vis_input[:,:,0], vis_pred[:,:,0]], axis=0)
+    y_pred = np.concatenate([vis_input[:,:,2], vis_pred[:,:,2]], axis=0)
+    z_pred = np.concatenate([vis_input[:,:,1], vis_pred[:,:,1]], axis=0)
+
+    total_frame = x_gt.shape[0]
+    time = np.arange(total_frame)
+    input_len = vis_input.shape[0]
+    num_joints = vis_input.shape[1]  # Should be 22
+
+    # 2. Create Giant Figure
+    # Height: ~2 inches per joint -> 44 inches tall
+    fig_height = num_joints * 2.0 
+    fig, axes = plt.subplots(nrows=num_joints, ncols=3, 
+                             figsize=(16, fig_height), 
+                             sharex=True)
+
+    # 3. Iterate through every joint
+    for j in range(num_joints):
+        joint_name = JOINT_NAMES_22.get(j, f"Joint {j}")
+        
+        # -- Column 0: X Coordinate --
+        ax_x = axes[j, 0]
+        ax_x.plot(time, x_gt[:, j], color='green', alpha=0.4, label='GT')
+        ax_x.plot(time[input_len-1:], x_pred[input_len-1:, j], color='red', linestyle='--', alpha=0.7, label='Pred')
+        
+        # LABELING: Put the Joint Name prominently on the left Y-axis
+        ax_x.set_ylabel(f"{joint_name}\nX", fontsize=9, fontweight='bold')
+        
+        # -- Column 1: Y Coordinate --
+        ax_y = axes[j, 1]
+        ax_y.plot(time, y_gt[:, j], color='green', alpha=0.4)
+        ax_y.plot(time[input_len-1:], y_pred[input_len-1:, j], color='red', linestyle='--', alpha=0.7)
+        ax_y.set_ylabel("Y", fontsize=8)
+
+        # -- Column 2: Z Coordinate --
+        ax_z = axes[j, 2]
+        ax_z.plot(time, z_gt[:, j], color='green', alpha=0.4)
+        ax_z.plot(time[input_len-1:], z_pred[input_len-1:, j], color='red', linestyle='--', alpha=0.7)
+        ax_z.set_ylabel("Z", fontsize=8)
+
+        # -- Styling for this row --
+        for ax in [ax_x, ax_y, ax_z]:
+            ax.axvline(x=input_len-1, color='black', linestyle=':', alpha=0.3)
+            ax.grid(True, alpha=0.2)
+            # Add Legend ONLY to the very first plot (Top-Left)
+            if j == 0 and ax == ax_x:
+                ax.legend(loc='upper right', fontsize=8)
+
+    # 4. Final Formatting
+    # Set X-labels only on the bottom row
+    axes[-1, 0].set_xlabel('Time (Frames)')
+    axes[-1, 1].set_xlabel('Time (Frames)')
+    axes[-1, 2].set_xlabel('Time (Frames)')
+    
+    plt.suptitle(f'Per-Joint Trajectories - Sample {sample_id}', y=1.0005, fontsize=16)
+    plt.tight_layout(rect=[0, 0, 1, 0.995]) 
+    
+    # Save
+    filename = f"{save_path}/{source_file}_joint_trajectory_{sample_id}.png"
+    plt.savefig(filename, dpi=100)
+    plt.close()
+    print(f"Saved giant plot to {filename}")
 
 def animate_trajectory_zed(vis_input, vis_target, vis_pred, skeleton_edges, interval=100):
     """
@@ -493,8 +609,119 @@ def animate_trajectory_zed(vis_input, vis_target, vis_pred, skeleton_edges, inte
     anim = animation.FuncAnimation(
         fig, update, frames=total_frames, interval=interval, blit=False
     )
-    anim.save(f'plots/new_{source_number}_skeleton_animation_{sample}.mp4', writer='ffmpeg', fps=10)
+    anim.save(f'plots/{source_file}_{sample}.mp4', writer='ffmpeg', fps=10)
     # anim.save(f'plots/{source_number}_original_source_{sample}.mp4', writer='ffmpeg', fps=10)
+
+def load_zed_json_3d(json_path, target_body_id=None):
+    """
+    Parses ZED JSON file into a (Frames, Joints, 3) numpy array.
+    """
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+
+    # 1. Sort frames by timestamp to ensure correct order
+    sorted_timestamps = sorted(data.keys(), key=lambda x: int(x))
+    
+    sequence = []
+    
+    for ts in sorted_timestamps:
+        frame_data = data[ts]
+        
+        # Skip frames with no bodies
+        if not frame_data.get('body_list'):
+            continue
+            
+        # Find the correct body
+        target_body = None
+        if target_body_id is not None:
+            # Look for specific ID
+            for body in frame_data['body_list']:
+                if body['id'] == target_body_id:
+                    target_body = body
+                    break
+        else:
+            # Default to the first body found
+            target_body = frame_data['body_list'][0]
+            
+        if target_body:
+            # ZED keypoints are usually flat lists. 
+            # Try 'keypoint' (usually 2D/3D mixed) or 'keypoint_3d' (preferred)
+            kp_raw = target_body.get('keypoint_3d') or target_body.get('keypoint')
+            
+            if kp_raw:
+                # Reshape to (N_Joints, 3)
+                kp_np = np.array(kp_raw).reshape(-1, 3)
+                sequence.append(kp_np)
+
+    if not sequence:
+        raise ValueError("No valid body data found in JSON.")
+        
+    return np.array(sequence)
+
+def animate_raw_zed_sequence(sequence_data, skeleton_edges, output_path='zed_sequence.mp4', interval=50):
+    """
+    Animates a single 3D sequence (Frames, Joints, 3).
+    """
+    total_frames = sequence_data.shape[0]
+    
+    # 1. Setup Figure
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_title(f"Raw ZED Sequence ({total_frames} frames)")
+
+    # 2. Setup Axis Limits (Global for the whole clip to prevent jumping)
+    # We use your coordinate mapping: Input Y -> Plot Z (Height)
+    # Input: (x, y, z) -> Plot: (x, z, y)
+    
+    x_data = sequence_data[:, :, 0]
+    y_data = sequence_data[:, :, 2] # Input Z -> Plot Y
+    z_data = sequence_data[:, :, 1] # Input Y -> Plot Z (Height)
+
+    x_min, x_max = x_data.min(), x_data.max()
+    y_min, y_max = y_data.min(), y_data.max()
+    z_min, z_max = z_data.min(), z_data.max()
+    
+    # Add some padding
+    pad = 0.2
+    ax.set_xlim(x_min - pad, x_max + pad)
+    ax.set_ylim(y_min - pad, y_max + pad)
+    ax.set_zlim(z_min - pad, z_max + pad)
+    
+    ax.set_xlabel('X')
+    ax.set_ylabel('Z (Depth)')
+    ax.set_zlabel('Y (Height)')
+    
+    # Set initial view angle
+    ax.view_init(elev=15, azim=45)
+
+    # 3. Initialize Lines
+    lines = [ax.plot([], [], [], linewidth=2, color='blue')[0] for _ in skeleton_edges]
+    
+    # 4. Update Function
+    def update(frame):
+        current_pose = sequence_data[frame]
+        
+        for line, (start, end) in zip(lines, skeleton_edges):
+            # Coordinate Mapping for Plotting:
+            # Plot X = Input X
+            # Plot Y = Input Z (Depth)
+            # Plot Z = Input Y (Vertical)
+            
+            xs = [current_pose[start, 0], current_pose[end, 0]]
+            ys = [current_pose[start, 2], current_pose[end, 2]] # Input Z mapped to Plot Y
+            zs = [current_pose[start, 1], current_pose[end, 1]] # Input Y mapped to Plot Z
+            
+            line.set_data(xs, ys)
+            line.set_3d_properties(zs)
+            
+        return lines
+
+    # 5. Save
+    print(f"Generating animation with {total_frames} frames...")
+    anim = animation.FuncAnimation(fig, update, frames=total_frames, interval=interval, blit=False)
+    anim.save(output_path, writer='ffmpeg', fps=15)
+    print(f"Saved to {output_path}")
+    plt.close()
 
 ##################################
 # MAIN CODE
@@ -502,31 +729,31 @@ def animate_trajectory_zed(vis_input, vis_target, vis_pred, skeleton_edges, inte
 zed = True #If using data from zed inference
 root = True #If using data with everything zeroed
 source_number = 2
+source_file = "30fps_body34_med_2"
+# source_file = "sanity_check"
 sample = 10 #which frame to analyze
 
 if zed:
-    data = np.load(f"zed_inference_results_{source_number}_norot_extrapolate.npz")
+    data = np.load(f"zed_inference_results_{source_file}.npz")
     # data = np.load("sanity_check.npz")
-    print(f"Loaded {len(data['inputs'])} samples from zed_inference_results_{source_number}.npz")
+    print(f"Loaded {len(data['inputs'])} samples from zed_inference_results_{source_file}.npz")
 else:
     data = np.load("results_dump.npz")
     print(f"Loaded {len(data['inputs'])} samples from results_dump.npz")
 
 frames_to_compute_error = [0, 3, 5, 9]
 
-
 # Extract arrays
 if zed:
     inputs = data['inputs']   # (N, 50, 22, 3)
     preds = data['preds']     # (N, 25, 22, 3)
     # targets = inputs[sample+25, -25:, :, :]  # (25, 22, 3)
+    # vis_target = targets
+
+    #Target specifically the sanity_check
     targets = preds
     vis_target = targets[0]
 
-
-    zero_input = data['zero_input']   # (N, 50, 22, 3)
-    zero_output = data['zero_output'] # (N, 25, 22, 3)
-    zero_target = zero_input[sample+25, -25:, :, :]  # (25, 22, 3)
 
 else:
     inputs = data['inputs']   # (3840, 50, 32, 3)
@@ -541,7 +768,13 @@ input_time = inputs.shape[1]
 pred_time = preds.shape[1]
 num_joints = inputs.shape[2]
 
+
+
 if root:
+    zero_input = data['zero_input']   # (N, 50, 22, 3)
+    zero_output = data['zero_output'] # (N, 25, 22, 3)
+    zero_target = zero_input[sample+25, -25:, :, :]  # (25, 22, 3)
+    
     vis_input= zero_input[sample]   # (50, 22, 3)
     vis_pred= zero_output[sample]     # (25, 22, 3  )
     vis_target = zero_target
@@ -555,9 +788,8 @@ vis_target = vis_target[0:10, :, :]
 vis_pred = vis_pred[0:10, :, :]
 # print(vis_input.shape, vis_target.shape, vis_pred.shape)
 
-plot_2d_trajectory(vis_input, vis_target, vis_pred)
 animate_trajectory_zed(vis_input, vis_target, vis_pred, SKELETON_EDGES_22)
-
+plot_2d_trajectory_separated(vis_input,vis_target, vis_pred, sample)
 # plot_entire_sequence(zero_input, [max(0,sample), min(sample +15, len(zero_input)-1)])   
 
 
@@ -565,3 +797,8 @@ animate_trajectory_zed(vis_input, vis_target, vis_pred, SKELETON_EDGES_22)
 # plot_trajectory_h36m(vis_input, vis_target, vis_pred)
 # animate_trajectory_zed(vis_input, vis_target, vis_pred, H36M_FULL_EDGES)
 # plot_single_skeleton_zed(vis_input)
+
+# Plot the entire raw data for check
+# source_path = "/home/sosuke/thesis/siMLPe/data/zed_data/30fps_body34_med_2.json"
+# zed_sequence = load_zed_json_3d(source_path)
+# animate_raw_zed_sequence(zed_sequence, SKELETON_EDGES_ZED_34, output_path="zed_raw_movement.mp4")

@@ -226,12 +226,36 @@ idct_m = torch.tensor(idct_m_np).float().cuda().unsqueeze(0)
 #Load ZED data
 ###########################
 source_number = 2
-source = f"/home/sosuke/thesis/siMLPe/data/zed_data/30fps_body34_fast_{source_number}.json"
+source_file = f"30fps_body34_med_{source_number}"
+source = f"/home/sosuke/thesis/siMLPe/data/zed_data/{source_file}.json"
 if source.endswith('.json') or source.endswith('.jsonl'):
     with open(source, 'r') as file:
         data = json.load(file)
 
+timestamps = sorted([entry['timestamp'] for entry in data.values()])
 
+# 2. Calculate differences between frames
+# Convert nanoseconds to seconds (1e9 ns = 1 s)
+timestamps_sec = np.array(timestamps) / 1e9
+deltas = np.diff(timestamps_sec)
+
+# 3. Calculate FPS stats
+# We use MEDIAN because it is robust against dropped frames/gaps
+median_delta = np.median(deltas)
+calculated_fps = 1.0 / median_delta
+
+print(f"Total Frames: {len(timestamps)}")
+print(f"Min Delta: {np.min(deltas) * 1000:.2f} ms")
+print(f"Median Delta: {median_delta * 1000:.2f} ms")
+print(f"Estimated FPS: {calculated_fps:.2f}")
+
+# Heuristic check
+if 28 < calculated_fps < 32:
+    print("--> This is likely 30 FPS data.")
+elif 58 < calculated_fps < 62:
+    print("--> This is likely 60 FPS data.")
+elif 14 < calculated_fps < 16:
+    print("--> This is likely 15 FPS data.")
 
 all_inputs_saved = []
 all_preds_saved = []
@@ -386,14 +410,14 @@ print("Saving results to disk...")
 all_inputs_saved = np.array(all_inputs_saved) # Shape (N, 50, 22, 3)
 all_preds_saved = np.array(all_preds_saved)   # Shape (N, 25, 22, 3)
 
-np.savez(f"zed_inference_results_{source_number}_norot_extrapolate.npz", 
+np.savez(f"zed_inference_results_{source_file}.npz", 
          inputs=all_inputs_saved, 
          preds=all_preds_saved,
          zero_input = zeroed_input,
          zero_output = zeroed_outpout
          )
 
-print(f"Done! Saved {len(all_preds_saved)} samples to zed_inference_results.npz_{source_number}")
+print(f"Done! Saved {len(all_preds_saved)} samples to zed_inference_results.{source_file}.npz")
 
 
 
