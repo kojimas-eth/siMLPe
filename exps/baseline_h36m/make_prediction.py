@@ -225,8 +225,8 @@ idct_m = torch.tensor(idct_m_np).float().cuda().unsqueeze(0)
 ############################
 #Load ZED data
 ###########################
-source_number = 2
-source_file = f"30fps_body34_med_{source_number}"
+source_number = 1
+source_file = f"30fps_body34_med_sit_{source_number}"
 source = f"/home/sosuke/thesis/siMLPe/data/zed_data/{source_file}.json"
 if source.endswith('.json') or source.endswith('.jsonl'):
     with open(source, 'r') as file:
@@ -251,16 +251,16 @@ print(f"Estimated FPS: {calculated_fps:.2f}")
 
 # Heuristic check
 if 28 < calculated_fps < 32:
-    print("--> This is likely 30 FPS data.")
+    print("--> This is likely 30 FPS data. Usually comes from fast quality setting")
 elif 58 < calculated_fps < 62:
     print("--> This is likely 60 FPS data.")
 elif 14 < calculated_fps < 16:
-    print("--> This is likely 15 FPS data.")
+    print("--> This is likely 15 FPS data. Usually comes from both medium quality setting.") 
 
 all_inputs_saved = []
 all_preds_saved = []
 zeroed_input=[]
-zeroed_outpout=[]
+zeroed_output=[]
 
 history_buffer = []
 MAX_SINGLE_JOINT_MOVE=0.3
@@ -316,90 +316,97 @@ for timestamp_key, frame_data in data.items():
             history_buffer.pop(0)
         
         if len(history_buffer) == 50:
-            past_frames = np.array(history_buffer) #(50,34,3)
-            h36m_order_converted = zed34_to_h36m32(past_frames)  #(50,32,3)
-
-            # # --- COORDINATE SYSTEM FIX (Y-Up -> Z-Up) ---
-            # h36m_rotated = h36m_order_converted.copy()
-
-            # # 1. Keep X the same
-            # h36m_rotated[:, :, 0] = h36m_order_converted[:, :, 0]
-
-            # # 2. Map ZED Depth (-Z) to H36M Depth (Y)
-            # # ZED is usually -Z forward. H36M is +Y forward.
-            # h36m_rotated[:, :, 1] = -h36m_order_converted[:, :, 2] 
-
-            # # 3. Map ZED Height (Y) to H36M Height (Z)
-            # h36m_rotated[:, :, 2] = h36m_order_converted[:, :, 1]
-
-
-            # # Update the variable flow
-            # h36m_order_converted = h36m_rotated
             
-            root = h36m_order_converted[:, 0:1, :]
-            h36m_rooted = h36m_order_converted - root
-        
-            input_22 = h36m_rooted[:, joint_used_xyz, :] # Shape (50, 22, 3)
-        
-            # 5. Save Input for Evaluation (Before reshaping)
-            all_inputs_saved.append(h36m_order_converted[:, joint_used_xyz, :])
-            zeroed_input.append(input_22)
+            # 1. Prepare Data
+            past_frames_zed = np.array(history_buffer) # (50, 34, 3)
             
+            # Map ZED(34) -> H36M(32)
+            h36m_32 = zed34_to_h36m32(past_frames_zed) # (50, 32, 3)
+
+            # A. Prepare Absolute Input (For 'all_inputs_saved')
+            input_absolute_22 = h36m_32[:, joint_used_xyz, :]
+            all_inputs_saved.append(input_absolute_22)
+
+            # B. Prepare Centered Input (For 'zeroed_input' & Model)
+            root = h36m_32[:, 0:1, :] # Pelvis
+            h36m_rooted = h36m_32 - root
+            input_centered_22 = h36m_rooted[:, joint_used_xyz, :] # (50, 22, 3)
+            zeroed_input.append(input_centered_22)
+
+            # 2. Setup Auto-Regressive Variables
+            TOTAL_HORIZON = 60   
+            PRED_STEP = 10       
+            num_iterations = TOTAL_HORIZON // PRED_STEP
+            #Scale the velocity and limb movement to make extreme predictions
+            LIMB_SCALE=2.0
+            ROOT_SCALE=1.1
+            
+            
+            # Convert to Tensor (Model expects centered data)
+            input_tensor = torch.tensor(input_centered_22).float().cuda()
+            input_tensor = input_tensor.reshape(1, 50, -1) 
+
+            # Root Velocity Tracking
+            last_root_pos = root[-1, 0, :]   
+            prev_root_pos = root[-20, 0, :]   
+            velocity = (last_root_pos - prev_root_pos) / 20.0 
+            velocity = velocity * ROOT_SCALE
+            current_root_cursor = last_root_pos.copy()
+
+            full_prediction_abs = []
+            full_prediction_centered = []
 
 
-            #--- INFERENCE  ---
+            # 3. Auto-Regressive Loop
             with torch.no_grad():
-                # Prepare Tensor: (Batch=1, Frames=50, Features=66)
-                input_tensor = torch.tensor(input_22).float().cuda()
-                input_tensor = input_tensor.reshape(1, 50, -1) #(1, 50, 66)
+                for i in range(num_iterations):
+                    # DCT & Model
+                    if config.deriv_input:
+                        input_dct = torch.matmul(dct_m[:, :, :config.motion.h36m_input_length], input_tensor)
+                    else:
+                        input_dct = input_tensor.clone()
+                    
+                    pred_dct = model(input_dct)
+                    pred_std = torch.matmul(idct_m[:, :config.motion.h36m_input_length, :], pred_dct) 
+                    
+                    # Take chunk
+                    pred_std = pred_std[:, :PRED_STEP, :] 
 
-                # 1. Apply DCT (Coordinate Space -> Frequency Space)
-                if config.deriv_input:
-                    input_dct = torch.matmul(dct_m[:, :, :config.motion.h36m_input_length], input_tensor)
-                else:
-                    input_dct = input_tensor.clone()
-                # 2. Model Prediction
-                pred_dct = model(input_dct)
+                    # Residual
+                    if config.deriv_output:
+                        pred_std = pred_std * LIMB_SCALE
+                        pred_std = pred_std + input_tensor[:, -1:, :].repeat(1, PRED_STEP, 1)
 
-                # 3. Apply Inverse DCT (Frequency Space -> Coordinate Space)
-                pred_std = torch.matmul(idct_m[:, :config.motion.h36m_input_length, :], pred_dct) # Shape: (1, 50, 66)
-                pred_std = pred_std[:, :25, :]
+                    # Update Buffer
+                    input_tensor = torch.cat([input_tensor[:, PRED_STEP:, :], pred_std], dim=1)
 
-                # 5. Add Residual (If model predicts offset from last frame)
-                if config.deriv_output:
-                    pred_std = pred_std + input_tensor[:, -1:, :].repeat(1, 25, 1)
+                    # --- Post-Process ---
+                    # 1. Centered Prediction
+                    pred_numpy_centered = pred_std.cpu().numpy().reshape(PRED_STEP, 22, 3)
+                    full_prediction_centered.append(pred_numpy_centered)
+                    
+                    # 2. Absolute Prediction (Add Root)
+                    chunk_roots = []
+                    for f in range(1, PRED_STEP + 1):
+                        new_root = current_root_cursor + (velocity * f)
+                        chunk_roots.append(new_root)
+                    
+                    chunk_roots = np.array(chunk_roots)[:, np.newaxis, :] 
+                    current_root_cursor = chunk_roots[-1, 0, :] 
+                    
+                    pred_numpy_abs = pred_numpy_centered + chunk_roots
+                    full_prediction_abs.append(pred_numpy_abs)
 
-                # --- C. POST-PROCESSING ---
-                # Reshape back to (25, 22, 3)
-                pred_numpy = pred_std.cpu().numpy().reshape(25, 22, 3)
-                zeroed_outpout.append(pred_numpy)
-                # --- D. RESTORE GLOBAL ROOT ---
-
-                # 1. Calculate the Linear Velocity of the root from the history by taking average
-                last_root_pos = root[-1, 0, :] # XYZ of root at frame 50
-                prev_root_pos = root[-20, 0, :] # XYZ of root at frame 30
-                velocity = (last_root_pos - prev_root_pos) / 20.0 
-
-                # 2. Project this velocity into the future (25 frames)
-                future_roots = []
-                for i in range(1, 26):
-                    new_root = last_root_pos + (velocity * i)
-                    future_roots.append(new_root)
-
-                future_roots = np.array(future_roots) # Shape (25, 3)
-                future_roots = future_roots[:, np.newaxis, :] # Shape (25, 1, 3)
-
-                # 3. Add the global root back to the prediction
-                # pred_numpy is (25, 22, 3). We broadcast add (25, 1, 3)
-                pred_numpy = pred_numpy + future_roots
-
-                # Store Prediction
-                all_preds_saved.append(pred_numpy)
-                
+            # 4. Final Save
+            final_pred_abs = np.concatenate(full_prediction_abs, axis=0)
+            final_pred_centered = np.concatenate(full_prediction_centered, axis=0)
+            
+            all_preds_saved.append(final_pred_abs)
+            zeroed_output.append(final_pred_centered)
 
                 # time.sleep(2)
-                if len(all_preds_saved) % 50 == 0:
-                    print(f"Predicted {len(all_preds_saved)} windows so far...")
+            if len(all_preds_saved) % 50 == 0:
+                print(f"Predicted {len(all_preds_saved)} windows so far...")
 
 
 
@@ -413,8 +420,8 @@ all_preds_saved = np.array(all_preds_saved)   # Shape (N, 25, 22, 3)
 np.savez(f"zed_inference_results_{source_file}.npz", 
          inputs=all_inputs_saved, 
          preds=all_preds_saved,
-         zero_input = zeroed_input,
-         zero_output = zeroed_outpout
+         zero_input = np.array(zeroed_input),
+         zero_output = np.array(zeroed_output)
          )
 
 print(f"Done! Saved {len(all_preds_saved)} samples to zed_inference_results.{source_file}.npz")

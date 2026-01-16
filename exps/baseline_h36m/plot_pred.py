@@ -4,6 +4,7 @@ from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d import Axes3D 
 from matplotlib import animation as animation
 import json
+import math
 
 ''' Joint used xyz corresponnd to the following edges
 RKnee, RAnkle, RToe, RSite
@@ -541,6 +542,8 @@ def animate_trajectory_zed(vis_input, vis_target, vis_pred, skeleton_edges, inte
     seq_gt = np.concatenate([vis_input, vis_target], axis=0)
     seq_pred = np.concatenate([vis_input, vis_pred], axis=0)
     
+    print(seq_gt.shape, seq_pred.shape)
+
     input_len = vis_input.shape[0]
     total_frames = seq_gt.shape[0]
 
@@ -555,10 +558,10 @@ def animate_trajectory_zed(vis_input, vis_target, vis_pred, skeleton_edges, inte
     
     # 3. Helper to determine global axis limits (crucial for stable 3D animation)
     all_data = np.concatenate([seq_gt, seq_pred], axis=0)
-    # Note: Using indices 0, 2, 1 based on your original flip logic (x, z, y)
+    # Note: Using indices 0, 2, 1 based on (x, z, y)
     x_min, x_max = all_data[:, :, 0].min(), all_data[:, :, 0].max()
-    y_min, y_max = all_data[:, :, 2].min(), all_data[:, :, 2].max() # Z in data is Y in plot
-    z_min, z_max = all_data[:, :, 1].min(), all_data[:, :, 1].max() # Y in data is Z in plot
+    y_min, y_max = all_data[:, :, 2].min(), all_data[:, :, 2].max() 
+    z_min, z_max = all_data[:, :, 1].min(), all_data[:, :, 1].max() 
     
     for ax in [ax1, ax2]:
         ax.set_xlim(x_min, x_max)
@@ -567,7 +570,7 @@ def animate_trajectory_zed(vis_input, vis_target, vis_pred, skeleton_edges, inte
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
         ax.set_zlabel('Z')
-        ax.view_init(elev=20, azim=45) # Optional: Set a nice camera angle
+        ax.view_init(elev=20, azim=45)
 
     # 4. Initialize Line Objects
     # We create a list of line objects for every edge in the skeleton
@@ -723,15 +726,19 @@ def animate_raw_zed_sequence(sequence_data, skeleton_edges, output_path='zed_seq
     print(f"Saved to {output_path}")
     plt.close()
 
+def plot_prediction_error(input, pred, truth):
+    """Plot the error over time for all joints"""
+
 ##################################
 # MAIN CODE
 ##################################
 zed = True #If using data from zed inference
 root = True #If using data with everything zeroed
 source_number = 2
-source_file = "30fps_body34_med_2"
+source_file = "30fps_body34_med_sit_1"
 # source_file = "sanity_check"
-sample = 10 #which frame to analyze
+sample = 40 #which frame to analyze
+pred_length = 60
 
 if zed:
     data = np.load(f"zed_inference_results_{source_file}.npz")
@@ -745,14 +752,13 @@ frames_to_compute_error = [0, 3, 5, 9]
 
 # Extract arrays
 if zed:
-    inputs = data['inputs']   # (N, 50, 22, 3)
-    preds = data['preds']     # (N, 25, 22, 3)
-    # targets = inputs[sample+25, -25:, :, :]  # (25, 22, 3)
-    # vis_target = targets
+    inputs = data['inputs']   # (Total Sample, 50, 22, 3)
+    preds = data['preds']     # (Total Sample, pred length, 22, 3)
+    print("The shapes of input, preds and target are",inputs.shape, preds.shape, targets.shape)
 
     #Target specifically the sanity_check
-    targets = preds
-    vis_target = targets[0]
+    # targets = preds
+    # vis_target = targets[0]
 
 
 else:
@@ -767,30 +773,81 @@ else:
 input_time = inputs.shape[1]
 pred_time = preds.shape[1]
 num_joints = inputs.shape[2]
-
+print("The shapes of input pred and joints are",input_time, pred_time, num_joints)
 
 
 if root:
-    zero_input = data['zero_input']   # (N, 50, 22, 3)
-    zero_output = data['zero_output'] # (N, 25, 22, 3)
-    zero_target = zero_input[sample+25, -25:, :, :]  # (25, 22, 3)
+    inputs = data['zero_input']   # (N, 50, 22, 3)
+    preds = data['zero_output'] # (N, 25, 22, 3)
     
-    vis_input= zero_input[sample]   # (50, 22, 3)
-    vis_pred= zero_output[sample]     # (25, 22, 3  )
-    vis_target = zero_target
+    vis_input= inputs[sample]   # (50, 22, 3)
+    vis_pred= preds[sample]     # (25, 22, 3  )
+
 else:
     vis_input=  inputs[sample]   # (50, 32, 3)
     vis_pred= preds[sample]     # (25, 32, 3)
 
+"""Handle the case where prediction length is longer than 50 frames for ground truth"""
+total_samples = inputs.shape[0]
+
+# 1. Simple Case: Prediction is shorter than input window
+if pred_length <= input_time:
+    # Logic: Start at 'sample + 50', take the first 'pred_length' frames
+    # Safety: Ensure we don't go off the end of the dataset
+    target_start_idx = sample + input_time
+    
+    if target_start_idx < total_samples:
+        vis_target = inputs[target_start_idx, :pred_length, :, :]
+    else:
+        print("End of dataset reached, cannot fetch GT.")
+        vis_target = np.zeros((pred_length, 22, 3)) # Placeholder
+
+# 2. Complex Case: Prediction is longer than input window (Stitching)
+else:
+    num_full_windows = math.floor(pred_length / input_time)
+    remainder = pred_length % input_time
+    
+    target_chunks = []
+    
+    # A. Collect full 50-frame windows
+    for i in range(num_full_windows):
+        # We step forward by 50 frames for each chunk
+        # Chunk 0 starts at sample+50
+        # Chunk 1 starts at sample+100
+        idx = sample + input_time + (i * input_time)
+        
+        if idx < total_samples:
+            target_chunks.append(inputs[idx, :, :, :]) # Take full 50 frames
+        else:
+            target_chunks.append(np.zeros((50, 22, 3))) # Padding if end of file
+            
+    # B. Collect the remainder (if any)
+    if remainder > 0:
+        idx = sample + input_time + (num_full_windows * input_time)
+
+        if idx < total_samples:
+            # Take the FIRST 'remainder' frames of this window
+            target_chunks.append(inputs[idx, :remainder, :, :]) 
+        else:
+            target_chunks.append(np.zeros((remainder, 22, 3)))
+
+    # C. Stitch them together
+    vis_target = np.concatenate(target_chunks, axis=0)
+
+# Final shape check
+print(f"Target Shape: {vis_target.shape}") # Should be (pred_length, 22, 3)
+
+
+
 #only take frist 10 frames
-plot_trajectory_zed(vis_input,vis_target,vis_pred,plot_length=10, highlight_frame=3)
-vis_target = vis_target[0:10, :, :]
-vis_pred = vis_pred[0:10, :, :]
+# plot_trajectory_zed(vis_input,vis_target,vis_pred,plot_length=10, highlight_frame=3)
+# vis_target = vis_target[0:10, :, :]
+# vis_pred = vis_pred[0:10, :, :]
 # print(vis_input.shape, vis_target.shape, vis_pred.shape)
 
+###### Create Animation of specific frame and create plot of all 22 joints ###### 
 animate_trajectory_zed(vis_input, vis_target, vis_pred, SKELETON_EDGES_22)
-plot_2d_trajectory_separated(vis_input,vis_target, vis_pred, sample)
-# plot_entire_sequence(zero_input, [max(0,sample), min(sample +15, len(zero_input)-1)])   
+# plot_2d_trajectory_separated(vis_input,vis_target, vis_pred, sample)
 
 
 
@@ -798,7 +855,7 @@ plot_2d_trajectory_separated(vis_input,vis_target, vis_pred, sample)
 # animate_trajectory_zed(vis_input, vis_target, vis_pred, H36M_FULL_EDGES)
 # plot_single_skeleton_zed(vis_input)
 
-# Plot the entire raw data for check
-# source_path = "/home/sosuke/thesis/siMLPe/data/zed_data/30fps_body34_med_2.json"
+######## Plot the entire raw data for check ##########
+# source_path = "/home/sosuke/thesis/siMLPe/data/zed_data/30fps_body34_med_rhand_1.json"
 # zed_sequence = load_zed_json_3d(source_path)
 # animate_raw_zed_sequence(zed_sequence, SKELETON_EDGES_ZED_34, output_path="zed_raw_movement.mp4")
