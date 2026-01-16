@@ -728,13 +728,37 @@ def animate_raw_zed_sequence(sequence_data, skeleton_edges, output_path='zed_seq
 
 def plot_prediction_error(input, pred, truth):
     """Plot the error over time for all joints"""
+    total_frames = pred.shape[0]
+    time_axis= np.arange(total_frames+1)
+
+    error = pred - truth
+    dist_error = np.linalg.norm(error, axis=-1)  # Shape: (Frames, Joints)
+    error_per_frame=np.mean(dist_error, axis=-1)  # Shape: (Frames,)
+    error_per_frame = np.concatenate(([0.0],error_per_frame))  # Add zero error for input frame
+    fig = plt.figure(figsize=(16, 8))
+
+    plt.plot(time_axis, error_per_frame, label='MPJPE (Mean Per Joint Position Error)', color='red', linewidth=2)
+    plt.title('Prediction Error Over Time', fontsize=14)
+    plt.xlabel('Prediction Frame Number', fontsize=12)
+    plt.ylabel('Average Joint Error (Meters)', fontsize=12)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    # Optional: Fill the area under the curve for better visibility
+    plt.fill_between(time_axis, error_per_frame, color='red', alpha=0.1)
+    
+    filename = f"plots/{source_file}_error_over_time_{sample}.png"
+    plt.savefig(filename, dpi=100)
+    plt.close()
+    print(f"Saved error plot to plots/{filename}")
+
 
 ##################################
 # MAIN CODE
 ##################################
 zed = True #If using data from zed inference
 root = True #If using data with everything zeroed
-source_number = 2
+source_number = 1
 source_file = "30fps_body34_med_sit_1"
 # source_file = "sanity_check"
 sample = 40 #which frame to analyze
@@ -754,7 +778,7 @@ frames_to_compute_error = [0, 3, 5, 9]
 if zed:
     inputs = data['inputs']   # (Total Sample, 50, 22, 3)
     preds = data['preds']     # (Total Sample, pred length, 22, 3)
-    print("The shapes of input, preds and target are",inputs.shape, preds.shape, targets.shape)
+    print("The shapes of input, preds and target are",inputs.shape, preds.shape)
 
     #Target specifically the sanity_check
     # targets = preds
@@ -846,9 +870,9 @@ print(f"Target Shape: {vis_target.shape}") # Should be (pred_length, 22, 3)
 # print(vis_input.shape, vis_target.shape, vis_pred.shape)
 
 ###### Create Animation of specific frame and create plot of all 22 joints ###### 
-animate_trajectory_zed(vis_input, vis_target, vis_pred, SKELETON_EDGES_22)
+# animate_trajectory_zed(vis_input, vis_target, vis_pred, SKELETON_EDGES_22)
 # plot_2d_trajectory_separated(vis_input,vis_target, vis_pred, sample)
-
+plot_prediction_error(vis_input, vis_pred, vis_target)
 
 
 # plot_trajectory_h36m(vis_input, vis_target, vis_pred)
