@@ -225,9 +225,10 @@ idct_m = torch.tensor(idct_m_np).float().cuda().unsqueeze(0)
 ############################
 #Load ZED data
 ###########################
-source_number = 1
-source_file = f"30fps_body34_med_sit_{source_number}"
-source = f"/home/sosuke/thesis/siMLPe/data/zed_data/{source_file}.json"
+source_number = 5
+source_file = f"34m_walk_{source_number}"
+# source = f"/home/sosuke/thesis/siMLPe/data/zed_data/{source_file}.json"
+source = f"/home/sosuke/thesis/siMLPe/data/jan16/{source_file}.json"
 if source.endswith('.json') or source.endswith('.jsonl'):
     with open(source, 'r') as file:
         data = json.load(file)
@@ -417,7 +418,14 @@ print("Saving results to disk...")
 all_inputs_saved = np.array(all_inputs_saved) # Shape (N, 50, 22, 3)
 all_preds_saved = np.array(all_preds_saved)   # Shape (N, 25, 22, 3)
 
-np.savez(f"zed_inference_results_{source_file}.npz", 
+folder_name = "predictions"
+# Create directory
+os.makedirs(folder_name, exist_ok=True)
+
+# Join path safely
+save_path = os.path.join(folder_name, f"{source_file}.npz")
+
+np.savez(save_path, 
          inputs=all_inputs_saved, 
          preds=all_preds_saved,
          zero_input = np.array(zeroed_input),
