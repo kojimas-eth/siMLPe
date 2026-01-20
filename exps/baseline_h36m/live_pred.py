@@ -198,14 +198,18 @@ dct_m_np, idct_m_np = get_dct_matrix(config.motion.h36m_input_length_dct) # usua
 dct_m = torch.tensor(dct_m_np).float().cuda().unsqueeze(0)
 idct_m = torch.tensor(idct_m_np).float().cuda().unsqueeze(0)
 
-def draw_prediction_on_image(image, pred_22, root_pos, camera_info):
+def draw_prediction_on_image(image, pred_22, root_pos, camera_info,image_scale):
     """
     Projects 3D prediction onto the 2D image plane and draws it.
     """
     # Get Camera Intrinsic Parameters
     calib = camera_info.camera_configuration.calibration_parameters.left_cam
-    fx, fy = calib.fx, calib.fy
-    cx, cy = calib.cx, calib.cy
+    sx, sy = image_scale 
+    
+    fx = calib.fx * sx
+    fy = calib.fy * sy
+    cx = calib.cx * sx
+    cy = calib.cy * sy
     
     # Helper to project 3D (x,y,z) -> 2D (u,v)
     def project(point_3d):
@@ -356,7 +360,7 @@ def main(opt):
     body_param.enable_tracking = True                # Track people across images flow
     body_param.enable_body_fitting = True            # Smooth skeleton move
     body_param.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_FAST
-    body_param.body_format = sl.BODY_FORMAT.BODY_34  # Choose the BODY_FORMAT you wish to use
+    body_param.body_format = sl.BODY_FORMAT.BODY_34  
     
 
     # Enable Object Detection module
@@ -432,7 +436,7 @@ def main(opt):
                     zeroed_input.append(input_centered_22)
 
                     # 2. Setup Auto-Regressive Variables
-                    TOTAL_HORIZON = 20   
+                    TOTAL_HORIZON = 10   
                     PRED_STEP = 10       
                     num_iterations = TOTAL_HORIZON // PRED_STEP
                     #Scale the velocity and limb movement to make extreme predictions
@@ -495,7 +499,7 @@ def main(opt):
                             pred_numpy_abs = pred_numpy_centered + chunk_roots
                             full_prediction_abs.append(pred_numpy_abs)
 
-                    # 4. Final Save
+                    # 4. Final Predictions stacked
                     final_pred_abs = np.concatenate(full_prediction_abs, axis=0)
                     final_pred_centered = np.concatenate(full_prediction_centered, axis=0)
                     
@@ -506,14 +510,20 @@ def main(opt):
                     #Create the prediction skeleton object
                     # final_pred_abs is (Total_Horizon, 22, 3)
                     if len(final_pred_abs) > 0:
-                        # Take the last frame to show the final predicted pose
+                        # prediction_skeleton = map_h36m_22_to_zed_34_sparse(last_pred_pose, last_root)
+
+                        # 4. Draw the last predictoin pose                      
                         last_pred_pose = final_pred_abs[-1]
                         last_root = current_root_cursor
-                        prediction_skeleton = map_h36m_22_to_zed_34_sparse(last_pred_pose, last_root)
+                        draw_prediction_on_image(image_left_ocv, last_pred_pose, last_root, camera_info, image_scale)
 
-                        draw_prediction_on_image(image_left_ocv, last_pred_pose, current_root_cursor, camera_info)
-                        # print(f"The predicted head is at {prediction_skeleton[0]}")
-                        # print(f"The observed head is at {keypoints_array[0]}")
+                        #Draw the ground truth current skeleton (sanity check)
+                        raw_input_batch = keypoints_array[np.newaxis, :, :] 
+                        h36m_current = zed34_to_h36m32(raw_input_batch)[0] # Shape (32, 3)
+                        current_root = h36m_current[0] 
+                        current_pose_22 = h36m_current[joint_used_xyz] 
+                        draw_prediction_on_image(image_left_ocv, current_pose_22, current_root, camera_info,image_scale)
+
                     else:
                         prediction_skeleton = None
 
