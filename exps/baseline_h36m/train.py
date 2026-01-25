@@ -6,44 +6,44 @@ import numpy as np
 import copy
 
 from config import config
-from model import siMLPe as Model
+from exps.baseline_h36m.model import siMLPe as Model
 from datasets.h36m import H36MDataset
 from utils.logger import get_logger, print_and_log_info
 from utils.pyt_utils import link_file, ensure_dir
 from datasets.h36m_eval import H36MEval
 
-from test import test
+from exps.baseline_h36m.test import test
 
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--exp-name', type=str, default=None, help='=exp name')
+    parser.add_argument('--seed', type=int, default=888, help='=seed')
+    parser.add_argument('--temporal-only', action='store_true', help='=temporal only')
+    parser.add_argument('--layer-norm-axis', type=str, default='spatial', help='=layernorm axis')
+    parser.add_argument('--with-normalization', action='store_true', help='=use layernorm')
+    parser.add_argument('--spatial-fc', action='store_true', help='=use only spatial fc')
+    parser.add_argument('--num', type=int, default=64, help='=num of blocks')
+    parser.add_argument('--weight', type=float, default=1., help='=loss weight')
 
-parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument('--exp-name', type=str, default=None, help='=exp name')
-parser.add_argument('--seed', type=int, default=888, help='=seed')
-parser.add_argument('--temporal-only', action='store_true', help='=temporal only')
-parser.add_argument('--layer-norm-axis', type=str, default='spatial', help='=layernorm axis')
-parser.add_argument('--with-normalization', action='store_true', help='=use layernorm')
-parser.add_argument('--spatial-fc', action='store_true', help='=use only spatial fc')
-parser.add_argument('--num', type=int, default=64, help='=num of blocks')
-parser.add_argument('--weight', type=float, default=1., help='=loss weight')
+    args = parser.parse_args()
 
-args = parser.parse_args()
+    torch.use_deterministic_algorithms(True)
+    acc_log = open(args.exp_name, 'a')
+    torch.manual_seed(args.seed)
+    writer = SummaryWriter()
 
-torch.use_deterministic_algorithms(True)
-acc_log = open(args.exp_name, 'a')
-torch.manual_seed(args.seed)
-writer = SummaryWriter()
+    config.motion_fc_in.temporal_fc = args.temporal_only
+    config.motion_fc_out.temporal_fc = args.temporal_only
+    config.motion_mlp.norm_axis = args.layer_norm_axis
+    config.motion_mlp.spatial_fc_only = args.spatial_fc
+    config.motion_mlp.with_normalization = args.with_normalization
+    config.motion_mlp.num_layers = args.num
 
-config.motion_fc_in.temporal_fc = args.temporal_only
-config.motion_fc_out.temporal_fc = args.temporal_only
-config.motion_mlp.norm_axis = args.layer_norm_axis
-config.motion_mlp.spatial_fc_only = args.spatial_fc
-config.motion_mlp.with_normalization = args.with_normalization
-config.motion_mlp.num_layers = args.num
-
-acc_log.write(''.join('Seed : ' + str(args.seed) + '\n'))
+    acc_log.write(''.join('Seed : ' + str(args.seed) + '\n'))
 
 def get_dct_matrix(N):
     dct_m = np.eye(N)
@@ -118,83 +118,84 @@ def train_step(h36m_motion_input, h36m_motion_target, model, optimizer, nb_iter,
 
     return loss.item(), optimizer, current_lr
 
-model = Model(config)
-model.train()
-model.cuda()
+if __name__ == '__main__':
+    model = Model(config)
+    model.train()
+    model.cuda()
 
-config.motion.h36m_target_length = config.motion.h36m_target_length_train
-dataset = H36MDataset(config, 'train', config.data_aug)
+    config.motion.h36m_target_length = config.motion.h36m_target_length_train
+    dataset = H36MDataset(config, 'train', config.data_aug)
 
-shuffle = True
-sampler = None
-dataloader = DataLoader(dataset, batch_size=config.batch_size,
-                        num_workers=config.num_workers, drop_last=True,
-                        sampler=sampler, shuffle=shuffle, pin_memory=True)
+    shuffle = True
+    sampler = None
+    dataloader = DataLoader(dataset, batch_size=config.batch_size,
+                            num_workers=config.num_workers, drop_last=True,
+                            sampler=sampler, shuffle=shuffle, pin_memory=True)
 
-eval_config = copy.deepcopy(config)
-eval_config.motion.h36m_target_length = eval_config.motion.h36m_target_length_eval
-eval_dataset = H36MEval(eval_config, 'test')
+    eval_config = copy.deepcopy(config)
+    eval_config.motion.h36m_target_length = eval_config.motion.h36m_target_length_eval
+    eval_dataset = H36MEval(eval_config, 'test')
 
-shuffle = False
-sampler = None
-eval_dataloader = DataLoader(eval_dataset, batch_size=128,
-                        num_workers=1, drop_last=False,
-                        sampler=sampler, shuffle=shuffle, pin_memory=True)
+    shuffle = False
+    sampler = None
+    eval_dataloader = DataLoader(eval_dataset, batch_size=128,
+                            num_workers=1, drop_last=False,
+                            sampler=sampler, shuffle=shuffle, pin_memory=True)
 
 
-# initialize optimizer
-optimizer = torch.optim.Adam(model.parameters(),
-                             lr=config.cos_lr_max,
-                             weight_decay=config.weight_decay)
+    # initialize optimizer
+    optimizer = torch.optim.Adam(model.parameters(),
+                                lr=config.cos_lr_max,
+                                weight_decay=config.weight_decay)
 
-ensure_dir(config.snapshot_dir)
-logger = get_logger(config.log_file, 'train')
-link_file(config.log_file, config.link_log_file)
+    ensure_dir(config.snapshot_dir)
+    logger = get_logger(config.log_file, 'train')
+    link_file(config.log_file, config.link_log_file)
 
-print_and_log_info(logger, json.dumps(config, indent=4, sort_keys=True))
+    print_and_log_info(logger, json.dumps(config, indent=4, sort_keys=True))
 
-if config.model_pth is not None :
-    state_dict = torch.load(config.model_pth)
-    model.load_state_dict(state_dict, strict=True)
-    print_and_log_info(logger, "Loading model path from {} ".format(config.model_pth))
+    if config.model_pth is not None :
+        state_dict = torch.load(config.model_pth)
+        model.load_state_dict(state_dict, strict=True)
+        print_and_log_info(logger, "Loading model path from {} ".format(config.model_pth))
 
-##### ------ training ------- #####
-nb_iter = 0
-avg_loss = 0.
-avg_lr = 0.
+    ##### ------ training ------- #####
+    nb_iter = 0
+    avg_loss = 0.
+    avg_lr = 0.
 
-while (nb_iter + 1) < config.cos_lr_total_iters:
+    while (nb_iter + 1) < config.cos_lr_total_iters:
 
-    for (h36m_motion_input, h36m_motion_target) in dataloader:
+        for (h36m_motion_input, h36m_motion_target) in dataloader:
 
-        loss, optimizer, current_lr = train_step(h36m_motion_input, h36m_motion_target, model, optimizer, nb_iter, config.cos_lr_total_iters, config.cos_lr_max, config.cos_lr_min)
-        avg_loss += loss
-        avg_lr += current_lr
+            loss, optimizer, current_lr = train_step(h36m_motion_input, h36m_motion_target, model, optimizer, nb_iter, config.cos_lr_total_iters, config.cos_lr_max, config.cos_lr_min)
+            avg_loss += loss
+            avg_lr += current_lr
 
-        if (nb_iter + 1) % config.print_every ==  0 :
-            avg_loss = avg_loss / config.print_every
-            avg_lr = avg_lr / config.print_every
+            if (nb_iter + 1) % config.print_every ==  0 :
+                avg_loss = avg_loss / config.print_every
+                avg_lr = avg_lr / config.print_every
 
-            print_and_log_info(logger, "Iter {} Summary: ".format(nb_iter + 1))
-            print_and_log_info(logger, f"\t lr: {avg_lr} \t Training loss: {avg_loss}")
-            avg_loss = 0
-            avg_lr = 0
+                print_and_log_info(logger, "Iter {} Summary: ".format(nb_iter + 1))
+                print_and_log_info(logger, f"\t lr: {avg_lr} \t Training loss: {avg_loss}")
+                avg_loss = 0
+                avg_lr = 0
 
-        if (nb_iter + 1) % config.save_every ==  0 :
-            torch.save(model.state_dict(), config.snapshot_dir + '/model-iter-' + str(nb_iter + 1) + '.pth')
-            model.eval()
-            acc_tmp = test(eval_config, model, eval_dataloader)
-            print(acc_tmp)
-            acc_log.write(''.join(str(nb_iter + 1) + '\n'))
-            line = ''
-            for ii in acc_tmp:
-                line += str(ii) + ' '
-            line += '\n'
-            acc_log.write(''.join(line))
-            model.train()
+            if (nb_iter + 1) % config.save_every ==  0 :
+                torch.save(model.state_dict(), config.snapshot_dir + '/model-iter-' + str(nb_iter + 1) + '.pth')
+                model.eval()
+                acc_tmp = test(eval_config, model, eval_dataloader)
+                print(acc_tmp)
+                acc_log.write(''.join(str(nb_iter + 1) + '\n'))
+                line = ''
+                for ii in acc_tmp:
+                    line += str(ii) + ' '
+                line += '\n'
+                acc_log.write(''.join(line))
+                model.train()
 
-        if (nb_iter + 1) == config.cos_lr_total_iters :
-            break
-        nb_iter += 1
+            if (nb_iter + 1) == config.cos_lr_total_iters :
+                break
+            nb_iter += 1
 
-writer.close()
+    writer.close()
