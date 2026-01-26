@@ -104,12 +104,75 @@ def zed34_to_h36m32(zed_data):
     h36m_data[:, 30, :] = zed_data[:, 16, :] # 
     h36m_data[:, 31, :] = zed_data[:, 16, :]
     return h36m_data
+SKELETON_EDGES_22 = [
+    # --- Right Leg (Starts at Knee) ---
+    (0, 1),   # RKnee -> RAnkle
+    (1, 2),   # RAnkle -> RToe
+    (2, 3),   # RToe -> RTip 
 
+    # --- Left Leg (Starts at Knee) ---
+    (4, 5),   # LKnee -> LAnkle
+    (5, 6),   # LAnkle -> LToe
+    (6, 7),   # LToe -> LTip 
+
+    # --- Spine & Head ---
+    (8, 9),   # Spine (Torso) -> Neck
+    (9, 10),  # Neck -> Head
+    (10, 11), # Head -> Head Site (Top)
+
+    # --- Left Arm ---
+    (9, 12),  # Neck -> LShoulder
+    (12, 13), # LShoulder -> LElbow
+    (13, 14), # LElbow -> LWrist
+    (14, 15), # LWrist -> LHand
+    (15, 16), # LHand -> LTip
+
+    # --- Right Arm ---
+    (9, 17),  # Neck -> RShoulder
+    (17, 18), # RShoulder -> RElbow
+    (18, 19), # RElbow -> RWrist
+    (19, 20), # RWrist -> RHand
+    (20, 21)  # RHand -> RTip
+]
+def constrain_prediction(past_frame, predicted_frame):
+    ''' 
+    Constrain the distance of keypoints to match realistic human body
+    Doing it in Batches, so get all predictions first then call this function
+    '''   
+    reference_body = past_frame #(22,3)
+    restrained_predicted_frames = np.copy(predicted_frame) #(Pred_frames, 22, 3)
+    parents = np.array([e[0] for e in SKELETON_EDGES_22])
+    children = np.array([e[1] for e in SKELETON_EDGES_22])
+
+    ref_vectors = reference_body[children] - reference_body[parents] 
+    ref_lengths = np.linalg.norm(ref_vectors, axis=1)
+
+    pred_vectors = predicted_frame[:, children] - predicted_frame[:, parents]
+    pred_dists = np.linalg.norm(pred_vectors, axis=2, keepdims=True)
+    
+    # print("prediction distance",pred_dists)
+    # print("reference lengths",ref_lengths)
+    
+    # Avoid division by zero
+    unit_directions = pred_vectors / (pred_dists + 1e-8)
+    # print(unit_directions)
+
+    for i, [p1,p2] in enumerate(SKELETON_EDGES_22):
+        restrained_predicted_frames[:, p2, :] = restrained_predicted_frames[:, p1, :] + unit_directions[:, i, :] * ref_lengths[i]
+    
+    # Verification Check
+    new_vectors = restrained_predicted_frames[:, children] - restrained_predicted_frames[:, parents]
+    new_lengths = np.linalg.norm(new_vectors, axis=2)
+    diff = np.abs(new_lengths - ref_lengths)
+    print("Max length violation:", np.max(diff)) # Should be near 0.0
+    return restrained_predicted_frames 
 
 ###########################
 #Load ZED data
 ###########################
 source_number = 1
+constrain = "constrain"
+# constrain = ""
 source_file = f"34f_arm_{source_number}"
 # source = f"/home/sosuke/thesis/siMLPe/data/zed_data/{source_file}.json"
 source = f"/home/sosuke/thesis/siMLPe/data/jan16/{source_file}.json"
@@ -146,6 +209,8 @@ zeroed_output=[]
 history_buffer = []
 MAX_SINGLE_JOINT_MOVE=0.3
 MAX_AVG_BODY_MOVE=0.3
+VEL_DAMPING = 1.0
+ACC_DAMPING = 0.95
 
 error_time = 0
 for timestamp_key, frame_data in data.items():
@@ -205,7 +270,6 @@ for timestamp_key, frame_data in data.items():
             # Map ZED(34) -> H36M(32)
             h36m_32 = zed34_to_h36m32(past_frames_zed) # (Range, 32, 3)
 
-            # A. Prepare Input (For 'all_inputs_saved')
             input_absolute_22 = h36m_32[:, joint_used_xyz, :]
             all_inputs_saved.append(input_absolute_22)
             
@@ -215,23 +279,37 @@ for timestamp_key, frame_data in data.items():
             input_centered_22 = h36m_rooted[:, joint_used_xyz, :] # (Range, 22, 3)
             zeroed_input.append(input_centered_22)
 
-
             vel=np.diff(input_absolute_22,axis=0) #(Range-1,22,3)
             acc= np.diff(vel, axis=0)    #(Range-2,22,3)
 
             avg_velocity=np.mean(vel, axis=0)
             avg_acceleration=np.mean(acc,axis=0)
 
+            #Batch calculation of extrapolating vel/acc
             predicted_frames =[]
             last_frame= input_absolute_22[-1]
-            for i in range(1, PREDICTION_FRAMES +1) :
-                displacement = (avg_velocity*i) + (0.5 * avg_acceleration*(i**2))
-                next_pose = last_frame + displacement
-                predicted_frames.append(next_pose)
+            t = np.arange(1, PREDICTION_FRAMES +1)
+            t=t[:,np.newaxis,np.newaxis]
 
-            predicted_frames = np.array(predicted_frames) 
+            if VEL_DAMPING <1.0:
+                velocity_component = avg_velocity * (1 - VEL_DAMPING ** t)/ (1-VEL_DAMPING)
+            else:
+                velocity_component = avg_velocity * t
+            
+            if ACC_DAMPING <1.0:
+                acceleration_component = 0.5 * avg_acceleration * (t **2) * (ACC_DAMPING ** t)
+            else:
+                acceleration_component = 0.5 * avg_acceleration * (t **2)
+
+            displacement = velocity_component + acceleration_component
+
+            predicted_frames = last_frame + displacement #(Pred_frames,22,3)
+
+            #Constrain predicted frames to have realistic bone lengths
+            if constrain:
+                predicted_frames = constrain_prediction(last_frame, predicted_frames)
+
             predicted_frames_centered = predicted_frames - root[-1, :]
-
             all_preds_saved.append(predicted_frames)
             zeroed_output.append(predicted_frames_centered)
 
@@ -254,7 +332,7 @@ folder_name = "predictions"
 os.makedirs(folder_name, exist_ok=True)
 
 # Join path safely
-save_path = os.path.join(folder_name, f"{source_file}_interp.npz")
+save_path = os.path.join(folder_name, f"{source_file}_interp_{constrain}.npz")
 
 np.savez(save_path, 
          inputs=all_inputs_saved, 
@@ -263,4 +341,4 @@ np.savez(save_path,
          zero_output = np.array(zeroed_output)
          )
 
-print(f"Done! Saved {len(all_preds_saved)} samples to zed_inference_results.{source_file}.npz")
+print(f"Done! Saved {len(all_preds_saved)} samples to {save_path}")
