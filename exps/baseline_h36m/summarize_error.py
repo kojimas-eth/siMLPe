@@ -37,9 +37,21 @@ def plot_single_prediction_error(input, pred, truth, file_name):
 # MAIN CODE
 ##################################
 # 1. Define the folder you are looking in
-search_folder = Path("predictions")
-speed= "m"
-part="walk"
+output_folder = Path("plots/error")
+output_folder.mkdir(parents=True, exist_ok=True)
+
+
+prefix = "constrain"
+interpolate = True
+speed= "f"
+part="arm"
+
+if interpolate:
+    search_folder = Path(f"../zed_finetune/predictions/{prefix}")
+    save_path = output_folder / f"interpolate_{prefix}_avg_{speed}_{part}_err_with_std.png" #original, constrain, finetune
+else:
+    search_folder = Path(f"predictions/{prefix}") #original, constrain, finetune
+    save_path = output_folder / f"{prefix}_avg_{speed}_{part}_err_with_std.png" #original, constrain, finetune
 
 # 2. Use glob to find files starting with "34f_part"
 files = search_folder.glob(f"34{speed}_{part}*")
@@ -123,18 +135,20 @@ for specific_file in files:
             else:
                 target_chunks.append(np.zeros((50, 22, 3))) # Padding if end of file
                 
-        # B. Collect the remainder (if any)
+
+        #Using the LAST remainder frames instead to handle short datasets 
         if remainder > 0:
-            idx = sample + input_time + (num_full_windows * input_time)
+            idx = sample + remainder + (num_full_windows * input_time)
 
             if idx < total_samples:
-                # Take the FIRST 'remainder' frames of this window
-                target_chunks.append(inputs[idx, :remainder, :, :]) 
+                # Take the LAST 'remainder' frames of this window
+                target_chunks.append(inputs[idx, -remainder:, :, :]) 
             else:
                 target_chunks.append(np.zeros((remainder, 22, 3)))
+                print("No more datasets available, resulting to 0s")
+    # C. Stitch them together
+    vis_target = np.concatenate(target_chunks, axis=0)
 
-        # C. Stitch them together
-        vis_target = np.concatenate(target_chunks, axis=0)
 
     # Final shape check
     print(f"Target Shape: {vis_target.shape}") # Should be (pred_length, 22, 3)
@@ -169,7 +183,7 @@ lower_bound = np.maximum(lower_bound, 0)
 
 fig = plt.figure(figsize=(16, 8))
 plt.plot(time_axis, error_per_frame, label='MPJPE (Mean Per Joint Position Error)', color='red', linewidth=2)
-plt.title('Averaged Prediction Error Over Time', fontsize=24)
+plt.title(f'Averaged Prediction Error Over Time for {prefix}', fontsize=24)
 plt.xlabel('Prediction Frame Number', fontsize=20)
 plt.ylabel('Average Joint Error (Meters)', fontsize=20)
 plt.grid(True, alpha=0.3)
@@ -182,9 +196,7 @@ plt.fill_between(time_axis, lower_bound, upper_bound, color='red', alpha=0.1, la
 plt.legend(loc='upper left', fontsize=12)
 
 
-output_folder = Path("plots/error")
-output_folder.mkdir(parents=True, exist_ok=True)
-save_path = output_folder / f"avg_{speed}_{part}_err_with_std.png"
+
 plt.savefig(save_path, dpi=100)
 plt.close()
 print(f"Saved error plot to {save_path}")

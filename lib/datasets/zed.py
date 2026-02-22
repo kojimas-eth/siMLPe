@@ -4,6 +4,7 @@ import json
 import numpy as np
 import torch
 import torch.utils.data as data
+import random
 
 class ZEDDataset(data.Dataset):
     def __init__(self, config, split_name, data_aug=False):
@@ -12,7 +13,7 @@ class ZEDDataset(data.Dataset):
         self.data_aug = data_aug
         
         # Path to your ZED data (JSON or NPZ files)
-        self.data_dir = os.path.join(config.root_dir, 'data/jan22_extradata') 
+        self.data_dir = config.zed_data_dir
         
         # Define parameters
         self.input_len = config.motion.h36m_input_length
@@ -26,15 +27,38 @@ class ZEDDataset(data.Dataset):
     def _load_zed_data(self):
         """
         Loads ZED JSON/NPZ files and converts them to (T, 22, 3) sequences.
-        Assumes ZED data is in METERS or MILLIMETERS.
+        Assumes ZED data is in METERS
         """
-        # Example: Loading all .json files in the directory
-        file_list = glob.glob(os.path.join(self.data_dir, '*.json'))
+        all_files= []
+
+        if isinstance (self.data_dir,str):
+            source_dir = [self.data_dir]
+        else:
+            source_dir = self.data_dir
+        
+        for folder in source_dir:
+            file_list = glob.glob(os.path.join(folder, '*.json'))                  
+            all_files.extend(file_list)
+
+        all_files = sorted(all_files)
+        rng = random.Random(1)
+        rng.shuffle(all_files)
+
+        split_idx = int(len(all_files) * 0.9)
+        print(f"Found {len(all_files)} total files across {len(source_dir)} folders.")
+       
+        if self.split_name == "train":
+            files_to_load = all_files[:split_idx]
+        else:
+            files_to_load = all_files[split_idx:]
+
+        print(f"Loading {self.split_name} data: {len(files_to_load)} files found.")
+
         all_sequences = []
         joint_used_xyz = np.array([2,3,4,5,7,8,9,10,12,13,14,15,17,18,19,21,22,25,26,27,29,30]).astype(np.int64)
 
 
-        for file_path in file_list:
+        for file_path in files_to_load:
             with open(file_path, 'r') as f:
                 data = json.load(f)
                 sorted_timestamps = sorted(data.keys(), key=lambda x: int(x))
@@ -55,13 +79,15 @@ class ZEDDataset(data.Dataset):
             
 
                 zed_keypoints_np = np.array(zed_keypoints)  # (Total frames, 34, 3)
-                print("zed kepoints",zed_keypoints_np.shape)
                 h36m_32 = self.zed34_to_h36m32(zed_keypoints_np) # (Total frames, 32, 3)
-                input_absolute_22 = h36m_32[:, joint_used_xyz, :]
+                root = h36m_32[:, 0:1, :] # Pelvis
+                h36m_rooted = h36m_32 - root
+                input_centered_22 = h36m_rooted[:, joint_used_xyz, :] # (50, 22, 3)
+                
             
-            # The model expects inputs normalized, but the dataset usually stores in mm
-            input_absolute_22 = input_absolute_22 * 1000.0
-            all_sequences.append(input_absolute_22)
+            # The model expects inputs normalized
+            input_centered_22 = input_centered_22
+            all_sequences.append(input_centered_22)
 
         final_dataset= np.concatenate(all_sequences, axis=0)
         print(f"Combined zed final dataset shape is {final_dataset.shape}")
@@ -190,14 +216,10 @@ class ZEDDataset(data.Dataset):
         motion = torch.from_numpy(motion).float()
 
         # Normalize: Input to model should be in METERS
-        h36m_motion_input = motion[:self.input_len] / 1000.0
-        h36m_motion_target = motion[self.input_len:] / 1000.0
+        h36m_motion_input = motion[:self.input_len]
+        h36m_motion_target = motion[self.input_len:] 
 
-        # Reshape to (T, 66) if your model expects flattened inputs
-        # The provided train.py seems to handle (B, N, 22, 3) inside train_step implicitly
-        # but check if reshaping is needed here. 
-        # Usually siMLPe expects (B, T, 66) or (B, T, 22, 3) depending on the linear layers.
-        # Based on config.motion.dim=66, flattening is likely expected.
+        # Reshape to (T, 66) 
         h36m_motion_input = h36m_motion_input.reshape(self.input_len, -1)
         h36m_motion_target = h36m_motion_target.reshape(self.target_len, -1)
 
