@@ -1,5 +1,9 @@
 import os, sys
-
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+lib_path = Path(__file__).resolve().parent.parent.parent / 'lib'
+if str(lib_path) not in sys.path:
+    sys.path.append(str(lib_path))
 # zed_helpers_path = "/usr/local/zed/samples/body tracking/body tracking/python"
 
 # # Verify the path exists to avoid confusing errors later
@@ -19,6 +23,8 @@ import numpy as np
 
 import argparse
 from scipy.spatial.transform import Rotation as R
+from  utils.kalman_filter import GlobalTrajectoryExtrapolator
+from  utils.extended_KF import MEKFTrajectoryExtrapolator
 import torch
 import json
 import time 
@@ -176,7 +182,8 @@ def zed34_to_h36m32(zed_data):
 #Load Model
 ###########################
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument('--model-pth', type=str, default="/home/nvidia/Downloads/siMLPe/checkpoints/h36m_model_35000.pth", help='=encoder path')
+# parser.add_argument('--model-pth', type=str, default="/home/nvidia/Downloads/siMLPe/checkpoints/h36m_model_35000.pth", help='=encoder path')
+parser.add_argument('--model-pth', type=str, default="/home/nvidia/Downloads/siMLPe/exps/zed_finetune/log/snapshot/fixed_world_zed_finetuned_40000.pth", help='=encoder path')
 args = parser.parse_args()
 
 model = Model(config)
@@ -290,23 +297,18 @@ def map_h36m_22_to_zed_34_sparse(pred_22, root_pos):
     # 1. Initialize with NaN to hide everything by default
     zed_34 = np.full((34, 3), np.nan)
     
-    # 2. Set Root (Required for the object to exist in viewer logic)
     zed_34[0] = root_pos
 
-    # 3. Map the 22 predicted joints to their ZED indices
-    # Mapping derived from your `zed34_to_h36m32` and `joint_used_xyz`
-    
     # --- Legs (Knees, Ankles, Feet) ---
-    # Hips are NOT predicted in your config, so thigh bones will be invisible
     zed_34[23] = pred_22[0] # R Knee
     zed_34[24] = pred_22[1] # R Ankle
     zed_34[25] = pred_22[2] # R Foot (Toe Base)
-    # pred_22[3] is R Toe Tip - No direct ZED index, skipping
+
     
     zed_34[19] = pred_22[4] # L Knee
     zed_34[20] = pred_22[5] # L Ankle
     zed_34[21] = pred_22[6] # L Foot
-    # pred_22[7] is L Toe Tip - skipping
+
 
     # --- Spine / Head ---
     zed_34[1]  = pred_22[8]  # Spine (Mapped from H36M SpineChest -> ZED 1)
@@ -391,9 +393,9 @@ def main(opt):
     zeroed_output=[]
 
     history_buffer = []
+    heading_list = []
     prediction_skeleton = None
-    MAX_SINGLE_JOINT_MOVE=0.3
-    MAX_AVG_BODY_MOVE=0.3
+
 
     while viewer.is_available():
         # Grab an image
@@ -404,60 +406,72 @@ def main(opt):
             zed.retrieve_bodies(bodies, body_runtime_param)
 
             for body in bodies.body_list:
-                # 1. GET THE KEYPOINTS
-                # 'keypoint' gives 3D coordinates (x, y, z) relative to camera
                 skeleton_3d = body.keypoint 
-
-                # 2. CONVERT TO NUMPY (Most models need this)
-                # The SDK returns a special list, convert it to numpy
                 keypoints_array= np.array(skeleton_3d)  #skeleton_array.shape = (34,3)
-        
+                heading_quat = body.global_root_orientation
+                heading_quat_array = np.array(heading_quat) #(4,)
+                heading_list.append(heading_quat_array)
                 ''' Changing to prediction code here'''
                 history_buffer.append(keypoints_array)
                         
                 if len(history_buffer)> 50:
                     history_buffer.pop(0)
+                    heading_list.pop(0)
                 
                 if len(history_buffer) == 50:
-                    # 1. Prepare Data
                     past_frames_zed = np.array(history_buffer) # (50, 34, 3)
-                    
                     # Map ZED(34) -> H36M(32)
                     h36m_32 = zed34_to_h36m32(past_frames_zed) # (50, 32, 3)
-
-                    # A. Prepare Absolute Input (For 'all_inputs_saved')
                     input_absolute_22 = h36m_32[:, joint_used_xyz, :]
                     all_inputs_saved.append(input_absolute_22)
 
-                    # B. Prepare Centered Input (For 'zeroed_input' & Model)
+                    # Prepare Centered Input (For 'zeroed_input' & Model)
                     root = h36m_32[:, 0:1, :] # Pelvis
                     h36m_rooted = h36m_32 - root
-                    input_centered_22 = h36m_rooted[:, joint_used_xyz, :] # (50, 22, 3)
+                    
+                    #Store the heading PRE-flipping of Y
+                    zed_quats_np = np.array(heading_list) # (50, 4)
+                    rotations = R.from_quat(zed_quats_np)
+
+                    #H36M Treats Facing forward as +Y whilst zed is -Y!!!
+                    correction_rot = R.from_euler('y', 180, degrees=True)
+                    corrected_inv_rotations = correction_rot * rotations.inv()
+
+                    inv_rot_matrices = corrected_inv_rotations.as_matrix()
+                    h36m_derotated = np.einsum('tij,tkj->tki', inv_rot_matrices, h36m_rooted)
+
+                    input_centered_22 = h36m_derotated[:, joint_used_xyz, :]
                     zeroed_input.append(input_centered_22)
 
-                    # 2. Setup Auto-Regressive Variables
-                    TOTAL_HORIZON = 10   
+                    # Setup Auto-Regressive Variables
+                    TOTAL_HORIZON = 60   
                     PRED_STEP = 10       
                     num_iterations = TOTAL_HORIZON // PRED_STEP
-                    #Scale the velocity and limb movement to make extreme predictions
+                    
+                    #Scale the velocity and limb movement if desired
                     LIMB_SCALE=1.0
                     ROOT_SCALE=1.0
                     
-                    
                     # Convert to Tensor (Model expects centered data)
+                    extrapolator = MEKFTrajectoryExtrapolator(dt=1.0/25.0)
+
+                    # 2. Feed the filter the past 50 frames (input sequence)
+                    for i in range(50):
+                        global_pos = past_frames_zed[i,0,:] # Shape (3,)
+                        global_quat = zed_quats_np[i]    # Shape (4,)
+                        extrapolator.update(global_pos, global_quat)
+                    future_global_pos, future_global_quats = extrapolator.predict_future(num_frames=TOTAL_HORIZON)
+                    future_rotations = R.from_quat(future_global_quats)
+
                     input_tensor = torch.tensor(input_centered_22).float().cuda()
                     input_tensor = input_tensor.reshape(1, 50, -1) 
 
-                    # Root Velocity Tracking
-                    last_root_pos = root[-1, 0, :]   
-                    prev_root_pos = root[-20, 0, :]   
-                    velocity = (last_root_pos - prev_root_pos) / 20.0 
-                    velocity = velocity * ROOT_SCALE
-                    current_root_cursor = last_root_pos.copy()
-
                     full_prediction_abs = []
                     full_prediction_centered = []
-
+                    
+                    #Rotations for re-mapping back to zed's world space
+                    future_rotations = R.from_quat(future_global_quats)
+                    correction_inv = correction_rot.inv()
 
                     # 3. Auto-Regressive Loop
                     with torch.no_grad():
@@ -471,7 +485,7 @@ def main(opt):
                             pred_dct = model(input_dct)
                             pred_std = torch.matmul(idct_m[:, :config.motion.h36m_input_length, :], pred_dct) 
                             
-                            # Take chunk
+                            # Take first 10 chunk of pred
                             pred_std = pred_std[:, :PRED_STEP, :] 
 
                             # Residual
@@ -485,44 +499,54 @@ def main(opt):
                             # --- Post-Process ---
                             # 1. Centered Prediction
                             pred_numpy_centered = pred_std.cpu().numpy().reshape(PRED_STEP, 22, 3)
+                            
+
                             full_prediction_centered.append(pred_numpy_centered)
                             
-                            # 2. Absolute Prediction (Add Root)
-                            chunk_roots = []
-                            for f in range(1, PRED_STEP + 1):
-                                new_root = current_root_cursor + (velocity * f)
-                                chunk_roots.append(new_root)
-                            
-                            chunk_roots = np.array(chunk_roots)[:, np.newaxis, :] 
-                            current_root_cursor = chunk_roots[-1, 0, :] 
-                            
-                            pred_numpy_abs = pred_numpy_centered + chunk_roots
-                            full_prediction_abs.append(pred_numpy_abs)
+                            final_global_poses = np.zeros_like(pred_numpy_centered)
 
-                    # 4. Final Predictions stacked
+                            for t in range(PRED_STEP):
+                                abs_t = (i * PRED_STEP) + t
+
+                                #Apply Y-axis flip redo
+                                final_rot = future_rotations[abs_t] * correction_inv
+                                rot_matrix = final_rot.as_matrix()
+                                
+                                # Get the rotation matrix for this specific future frame
+                                # rot_matrix = future_rotations[abs_t].as_matrix() # Shape (3, 3)
+                                
+                                # Re-apply KF rotation and position to all 22 joints
+                                rotated_pose = (rot_matrix @ pred_numpy_centered[t].T).T 
+                                final_global_poses[t] = rotated_pose + future_global_pos[abs_t]
+                                
+                            full_prediction_abs.append(final_global_poses)
+
+                    # 4. Final Save
                     final_pred_abs = np.concatenate(full_prediction_abs, axis=0)
                     final_pred_centered = np.concatenate(full_prediction_centered, axis=0)
                     
-                    #Save all input for future analysis
-                    # all_preds_saved.append(final_pred_abs)
-                    # zeroed_output.append(final_pred_centered)
+                    all_preds_saved.append(final_pred_abs)
+                    zeroed_output.append(final_pred_centered)
 
                     #Create the prediction skeleton object
                     # final_pred_abs is (Total_Horizon, 22, 3)
+                    # Create the prediction skeleton object
                     if len(final_pred_abs) > 0:
-                        # prediction_skeleton = map_h36m_22_to_zed_34_sparse(last_pred_pose, last_root)
-
-                        # 4. Draw the last predictoin pose                      
-                        last_pred_pose = final_pred_abs[-1]
-                        last_root = current_root_cursor
+                        
+                        # 1. Get the absolute 3D locations for all 22 joints
+                        last_pred_pose = final_pred_abs[-1] 
+                        
+                        # 2. Get the KF's predicted root (pelvis) position 
+                        last_root = future_global_pos[-1]
+                        
+                        # 3. Draw it!
                         draw_prediction_on_image(image_left_ocv, last_pred_pose, last_root, camera_info, image_scale)
-
                         #Draw the ground truth current skeleton (sanity check)
-                        raw_input_batch = keypoints_array[np.newaxis, :, :] 
-                        h36m_current = zed34_to_h36m32(raw_input_batch)[0] # Shape (32, 3)
-                        current_root = h36m_current[0] 
-                        current_pose_22 = h36m_current[joint_used_xyz] 
-                        draw_prediction_on_image(image_left_ocv, current_pose_22, current_root, camera_info,image_scale)
+                        # raw_input_batch = keypoints_array[np.newaxis, :, :] 
+                        # h36m_current = zed34_to_h36m32(raw_input_batch)[0] # Shape (32, 3)
+                        # current_root = h36m_current[0] 
+                        # current_pose_22 = h36m_current[joint_used_xyz] 
+                        # draw_prediction_on_image(image_left_ocv, current_pose_22, current_root, camera_info,image_scale)
 
                     else:
                         prediction_skeleton = None
