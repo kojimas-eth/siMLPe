@@ -32,171 +32,324 @@ def plot_single_prediction_error(input, pred, truth, file_name):
     plt.close()
     print(f"Saved error plot to plots/{filename}")
 
+def get_predictor_error_stats(search_folder,  part):
+    """
+    Finds files in a given folder, calculates the error per frame for each trial,
+    and returns the mean and standard deviation bounds.
+    """
+    files = list(search_folder.glob(f"{part}*"))
+    if not files:
+        print(f"Warning: No files found in {search_folder}")
+        return None, None, None
+
+    cumulative_error = []
+    
+    for specific_file in files:
+        print(f"Found file: {specific_file.name}")
+
+        zed = True #If using data from zed inference
+        root = True #If using data with everything zeroed
+        sample = 50 #which frame to analyze
+        pred_length = 60
+
+        data = np.load(specific_file)
+        
+        # Extract arrays
+        if zed:
+            inputs = data['inputs']   # (Total Sample, 50, 22, 3)
+            preds = data['preds']     # (Total Sample, pred length, 22, 3)
+        else:
+            inputs = data['inputs']   # (3840, 50, 32, 3)
+            targets = data['targets'] # (N, 25, 32, 3)
+            preds = data['preds']     # (N, 25, 32, 3)
+            vis_target= targets[sample] # (25, 32, 3)
+
+        if root:
+            inputs = data['zero_input']   # (N, 50, 22, 3)
+            preds = data['zero_output'] # (N, 25, 22, 3)
+            vis_input= inputs[sample]   # (50, 22, 3)
+            vis_pred= preds[sample]     # (25, 22, 3  )
+        else:
+            vis_input=  inputs[sample]   # (50, 32, 3)
+            vis_pred= preds[sample]     # (25, 32, 3)
+
+        # Handle the case where prediction length is longer than 50 frames for ground truth
+        total_samples = inputs.shape[0]
+        input_time = inputs.shape[1]
+        pred_time = preds.shape[1]
+        num_joints = inputs.shape[2]
+
+        # 1. Simple Case: Prediction is shorter than input window
+        if pred_length <= input_time:
+            target_start_idx = sample + input_time
+            if target_start_idx < total_samples:
+                vis_target = inputs[target_start_idx, :pred_length, :, :]
+            else:
+                vis_target = np.zeros((pred_length, 22, 3)) # Placeholder
+
+        # 2. Complex Case: Prediction is longer than input window (Stitching)
+        else:
+            num_full_windows = math.floor(pred_length / input_time)
+            remainder = pred_length % input_time
+            target_chunks = []
+            
+            # A. Collect full 50-frame windows
+            for i in range(num_full_windows):
+                idx = sample + input_time + (i * input_time)
+                if idx < total_samples:
+                    target_chunks.append(inputs[idx, :, :, :]) 
+                else:
+                    target_chunks.append(np.zeros((input_time, 22, 3))) 
+                    
+            # Using the LAST remainder frames instead to handle short datasets 
+            if remainder > 0:
+                idx = sample + remainder + (num_full_windows * input_time)
+                if idx < total_samples:
+                    target_chunks.append(inputs[idx, -remainder:, :, :]) 
+                else:
+                    target_chunks.append(np.zeros((remainder, 22, 3)))
+                    print("No more datasets available, resulting to 0s")
+                    
+            # C. Stitch them together
+            vis_target = np.concatenate(target_chunks, axis=0)
+
+        # Save the errors from each loop
+        error = vis_pred - vis_target
+        dist_error = np.linalg.norm(error, axis=-1)  # Shape: (Frames, Joints)
+        error_per_frame = np.mean(dist_error, axis=-1)  # Shape: (Frames,)
+        cumulative_error.append(error_per_frame)
+
+    # Calculate Mean and Standard Deviation across the files
+    all_errors = np.vstack(cumulative_error)
+    avg_error_per_frame = np.mean(all_errors, axis=0) 
+    std_dev_per_frame = np.std(all_errors, axis=0)
+    
+    # Add zero error for input frame
+    error_curve = np.concatenate(([0.0], avg_error_per_frame))
+    upper_bound = error_curve + np.concatenate(([0.0], std_dev_per_frame))  
+    lower_bound = error_curve - np.concatenate(([0.0], std_dev_per_frame))  
+    lower_bound = np.maximum(lower_bound, 0)
+    
+    return error_curve, lower_bound, upper_bound
+
+##################################
+# MAIN PLOTTING SCRIPT
+##################################
+
+output_folder = Path("plots/error")
+output_folder.mkdir(parents=True, exist_ok=True)
+
+# Define common variables
+interpolate = True
+part = "moving"
+
+# Define predictor 1
+prefix_1 = "fix_finetune"
+folder_1 = Path(f"../baseline_h36m/predictions_fix/{prefix_1}")
+
+# Define predictor 2
+prefix_2 = "fix_original"
+folder_2 = Path(f"../baseline_h36m/predictions_fix/{prefix_2}")
+
+# Get error stats for both predictors
+print(f"--- Processing Predictor 1: {prefix_1} ---")
+err_1, low_1, up_1 = get_predictor_error_stats(folder_1, part)
+
+print(f"\n--- Processing Predictor 2: {prefix_2} ---")
+err_2, low_2, up_2 = get_predictor_error_stats(folder_2, part)
+
+# Plotting
+fig = plt.figure(figsize=(16, 8))
+time_axis = np.arange(len(err_1)) # Assuming both have the same pred_length
+
+if err_1 is not None:
+    plt.plot(time_axis, err_1, label=f'MPJPE ({prefix_1})', color='red', linewidth=2)
+    plt.fill_between(time_axis, low_1, up_1, color='red', alpha=0.1, label=f'±1$\sigma$ ({prefix_1})')
+
+if err_2 is not None:
+    plt.plot(time_axis, err_2, label=f'MPJPE ({prefix_2})', color='blue', linewidth=2)
+    plt.fill_between(time_axis, low_2, up_2, color='blue', alpha=0.1, label=f'±1$\sigma$ ({prefix_2})')
+
+# Formatting
+title_prefix = f"Finetuned vs Original avg"
+plt.title(f'Comparison of Prediction Error Over Time: {prefix_1} vs {prefix_2}', fontsize=24)
+plt.xlabel('Prediction Frame Number', fontsize=20)
+plt.ylabel('Average Joint Error (Meters)', fontsize=20)
+plt.grid(True, alpha=0.3)
+plt.xticks(fontsize=12) 
+plt.yticks(fontsize=12)
+plt.legend(loc='upper left', fontsize=12)
+
+# Save the plot
+save_path = output_folder / f"comparison_{prefix_1}_vs_{prefix_2}_{part}.png"
+plt.savefig(save_path, dpi=100)
+plt.close()
+print(f"\nSaved combined error plot to {save_path}")
 
 ##################################
 # MAIN CODE
 ##################################
 # 1. Define the folder you are looking in
-output_folder = Path("plots/error")
-output_folder.mkdir(parents=True, exist_ok=True)
+# output_folder = Path("plots/error")
+# output_folder.mkdir(parents=True, exist_ok=True)
 
 
-prefix = "constrain"
-interpolate = True
-speed= "f"
-part="arm"
+# prefix = "constrain"
+# interpolate = True
+# speed= "f"
+# part="arm"
 
-if interpolate:
-    search_folder = Path(f"../zed_finetune/predictions/{prefix}")
-    save_path = output_folder / f"interpolate_{prefix}_avg_{speed}_{part}_err_with_std.png" #original, constrain, finetune
-else:
-    search_folder = Path(f"predictions/{prefix}") #original, constrain, finetune
-    save_path = output_folder / f"{prefix}_avg_{speed}_{part}_err_with_std.png" #original, constrain, finetune
+# if interpolate:
+#     search_folder = Path(f"../zed_finetune/predictions/{prefix}")
+#     save_path = output_folder / f"interpolate_{prefix}_avg_{speed}_{part}_err_with_std.png" #original, constrain, finetune
+# else:
+#     search_folder = Path(f"predictions/{prefix}") #original, constrain, finetune
+#     save_path = output_folder / f"{prefix}_avg_{speed}_{part}_err_with_std.png" #original, constrain, finetune
 
-# 2. Use glob to find files starting with "34f_part"
-files = search_folder.glob(f"34{speed}_{part}*")
+# # 2. Use glob to find files starting with "34f_part"
+# files = search_folder.glob(f"34{speed}_{part}*")
 
-# 3. Loop through them
-# specific_file is a Path object, so you can easily access its parts
-cumulative_error = []
-for specific_file in files:
-    print(f"Found file: {specific_file.name}")
+# # 3. Loop through them
+# # specific_file is a Path object, so you can easily access its parts
+# cumulative_error = []
+# for specific_file in files:
+#     print(f"Found file: {specific_file.name}")
 
-    zed = True #If using data from zed inference
-    root = True #If using data with everything zeroed
-    sample = 0 #which frame to analyze
-    pred_length = 60
+#     zed = True #If using data from zed inference
+#     root = True #If using data with everything zeroed
+#     sample = 0 #which frame to analyze
+#     pred_length = 60
 
-    data = np.load(specific_file)
-    print(f"Loaded {len(data['inputs'])} samples from {specific_file.name}")
-
-
-    # Extract arrays
-    if zed:
-        inputs = data['inputs']   # (Total Sample, 50, 22, 3)
-        preds = data['preds']     # (Total Sample, pred length, 22, 3)
-        print("The shapes of input, preds and target are",inputs.shape, preds.shape)
+#     data = np.load(specific_file)
+#     print(f"Loaded {len(data['inputs'])} samples from {specific_file.name}")
 
 
-    else:
-        inputs = data['inputs']   # (3840, 50, 32, 3)
-        targets = data['targets'] # (N, 25, 32, 3)
-        preds = data['preds']     # (N, 25, 32, 3)
+#     # Extract arrays
+#     if zed:
+#         inputs = data['inputs']   # (Total Sample, 50, 22, 3)
+#         preds = data['preds']     # (Total Sample, pred length, 22, 3)
+#         print("The shapes of input, preds and target are",inputs.shape, preds.shape)
+
+
+#     else:
+#         inputs = data['inputs']   # (3840, 50, 32, 3)
+#         targets = data['targets'] # (N, 25, 32, 3)
+#         preds = data['preds']     # (N, 25, 32, 3)
         
-        vis_target= targets[sample] # (25, 32, 3)
+#         vis_target= targets[sample] # (25, 32, 3)
 
 
-    if root:
-        inputs = data['zero_input']   # (N, 50, 22, 3)
-        preds = data['zero_output'] # (N, 25, 22, 3)
+#     if root:
+#         inputs = data['zero_input']   # (N, 50, 22, 3)
+#         preds = data['zero_output'] # (N, 25, 22, 3)
         
-        vis_input= inputs[sample]   # (50, 22, 3)
-        vis_pred= preds[sample]     # (25, 22, 3  )
+#         vis_input= inputs[sample]   # (50, 22, 3)
+#         vis_pred= preds[sample]     # (25, 22, 3  )
 
-    else:
-        vis_input=  inputs[sample]   # (50, 32, 3)
-        vis_pred= preds[sample]     # (25, 32, 3)
+#     else:
+#         vis_input=  inputs[sample]   # (50, 32, 3)
+#         vis_pred= preds[sample]     # (25, 32, 3)
 
-    """Handle the case where prediction length is longer than 50 frames for ground truth"""
-    total_samples = inputs.shape[0]
+#     """Handle the case where prediction length is longer than 50 frames for ground truth"""
+#     total_samples = inputs.shape[0]
     
-    input_time = inputs.shape[1]
-    pred_time = preds.shape[1]
-    num_joints = inputs.shape[2]
+#     input_time = inputs.shape[1]
+#     pred_time = preds.shape[1]
+#     num_joints = inputs.shape[2]
 
-    # 1. Simple Case: Prediction is shorter than input window
-    if pred_length <= input_time:
-        # Logic: Start at 'sample + 50', take the first 'pred_length' frames
-        # Safety: Ensure we don't go off the end of the dataset
-        target_start_idx = sample + input_time
+#     # 1. Simple Case: Prediction is shorter than input window
+#     if pred_length <= input_time:
+#         # Logic: Start at 'sample + 50', take the first 'pred_length' frames
+#         # Safety: Ensure we don't go off the end of the dataset
+#         target_start_idx = sample + input_time
         
-        if target_start_idx < total_samples:
-            vis_target = inputs[target_start_idx, :pred_length, :, :]
-        else:
-            print("End of dataset reached, cannot fetch GT.")
-            vis_target = np.zeros((pred_length, 22, 3)) # Placeholder
+#         if target_start_idx < total_samples:
+#             vis_target = inputs[target_start_idx, :pred_length, :, :]
+#         else:
+#             print("End of dataset reached, cannot fetch GT.")
+#             vis_target = np.zeros((pred_length, 22, 3)) # Placeholder
 
-    # 2. Complex Case: Prediction is longer than input window (Stitching)
-    else:
-        num_full_windows = math.floor(pred_length / input_time)
-        remainder = pred_length % input_time
+#     # 2. Complex Case: Prediction is longer than input window (Stitching)
+#     else:
+#         num_full_windows = math.floor(pred_length / input_time)
+#         remainder = pred_length % input_time
         
-        target_chunks = []
+#         target_chunks = []
         
-        # A. Collect full 50-frame windows
-        for i in range(num_full_windows):
-            # We step forward by 50 frames for each chunk
-            # Chunk 0 starts at sample+50
-            # Chunk 1 starts at sample+100
-            idx = sample + input_time + (i * input_time)
+#         # A. Collect full 50-frame windows
+#         for i in range(num_full_windows):
+#             # We step forward by 50 frames for each chunk
+#             # Chunk 0 starts at sample+50
+#             # Chunk 1 starts at sample+100
+#             idx = sample + input_time + (i * input_time)
             
-            if idx < total_samples:
-                target_chunks.append(inputs[idx, :, :, :]) # Take full 50 frames
-            else:
-                target_chunks.append(np.zeros((50, 22, 3))) # Padding if end of file
+#             if idx < total_samples:
+#                 target_chunks.append(inputs[idx, :, :, :]) # Take full 50 frames
+#             else:
+#                 target_chunks.append(np.zeros((50, 22, 3))) # Padding if end of file
                 
 
-        #Using the LAST remainder frames instead to handle short datasets 
-        if remainder > 0:
-            idx = sample + remainder + (num_full_windows * input_time)
+#         #Using the LAST remainder frames instead to handle short datasets 
+#         if remainder > 0:
+#             idx = sample + remainder + (num_full_windows * input_time)
 
-            if idx < total_samples:
-                # Take the LAST 'remainder' frames of this window
-                target_chunks.append(inputs[idx, -remainder:, :, :]) 
-            else:
-                target_chunks.append(np.zeros((remainder, 22, 3)))
-                print("No more datasets available, resulting to 0s")
-    # C. Stitch them together
-    vis_target = np.concatenate(target_chunks, axis=0)
-
-
-    # Final shape check
-    print(f"Target Shape: {vis_target.shape}") # Should be (pred_length, 22, 3)
-
-    #Now save the errors from each loop
-    error = vis_pred - vis_target
-    dist_error = np.linalg.norm(error, axis=-1)  # Shape: (Frames, Joints)
-    error_per_frame=np.mean(dist_error, axis=-1)  # Shape: (Frames,)
-    cumulative_error.append(error_per_frame)
+#             if idx < total_samples:
+#                 # Take the LAST 'remainder' frames of this window
+#                 target_chunks.append(inputs[idx, -remainder:, :, :]) 
+#             else:
+#                 target_chunks.append(np.zeros((remainder, 22, 3)))
+#                 print("No more datasets available, resulting to 0s")
+#     # C. Stitch them together
+#     vis_target = np.concatenate(target_chunks, axis=0)
 
 
-all_errors = np.vstack(cumulative_error)
+#     # Final shape check
+#     print(f"Target Shape: {vis_target.shape}") # Should be (pred_length, 22, 3)
 
-# Calculate Mean and Standard Deviation across the files (axis 0)
-avg_error_per_frame = np.mean(all_errors, axis=0) 
-std_dev_per_frame = np.std(all_errors, axis=0) # Very useful for plotting shading!
-print(avg_error_per_frame.shape)
-print(f"Average error at Frame 0: {avg_error_per_frame[0]}")
-
-
-"""Plotting the average error across files"""
-total_frames = avg_error_per_frame.shape[0]
-time_axis= np.arange(total_frames+1)
+#     #Now save the errors from each loop
+#     error = vis_pred - vis_target
+#     dist_error = np.linalg.norm(error, axis=-1)  # Shape: (Frames, Joints)
+#     error_per_frame=np.mean(dist_error, axis=-1)  # Shape: (Frames,)
+#     cumulative_error.append(error_per_frame)
 
 
-error_per_frame = np.concatenate(([0.0],avg_error_per_frame))  # Add zero error for input frame
-upper_bound = error_per_frame + np.concatenate(([0.0],std_dev_per_frame))  
-lower_bound = error_per_frame - np.concatenate(([0.0],std_dev_per_frame))  
-lower_bound = np.maximum(lower_bound, 0)
+# all_errors = np.vstack(cumulative_error)
+
+# # Calculate Mean and Standard Deviation across the files (axis 0)
+# avg_error_per_frame = np.mean(all_errors, axis=0) 
+# std_dev_per_frame = np.std(all_errors, axis=0) # Very useful for plotting shading!
+# print(avg_error_per_frame.shape)
+# print(f"Average error at Frame 0: {avg_error_per_frame[0]}")
 
 
+# """Plotting the average error across files"""
+# total_frames = avg_error_per_frame.shape[0]
+# time_axis= np.arange(total_frames+1)
 
-fig = plt.figure(figsize=(16, 8))
-plt.plot(time_axis, error_per_frame, label='MPJPE (Mean Per Joint Position Error)', color='red', linewidth=2)
-plt.title(f'Averaged Prediction Error Over Time for {prefix}', fontsize=24)
-plt.xlabel('Prediction Frame Number', fontsize=20)
-plt.ylabel('Average Joint Error (Meters)', fontsize=20)
-plt.grid(True, alpha=0.3)
 
-# Increase X-axis tick label size
-plt.xticks(fontsize=12) 
-plt.yticks(fontsize=12)
-
-plt.fill_between(time_axis, lower_bound, upper_bound, color='red', alpha=0.1, label='Standard Deviation (±1$\sigma$)')
-plt.legend(loc='upper left', fontsize=12)
+# error_per_frame = np.concatenate(([0.0],avg_error_per_frame))  # Add zero error for input frame
+# upper_bound = error_per_frame + np.concatenate(([0.0],std_dev_per_frame))  
+# lower_bound = error_per_frame - np.concatenate(([0.0],std_dev_per_frame))  
+# lower_bound = np.maximum(lower_bound, 0)
 
 
 
-plt.savefig(save_path, dpi=100)
-plt.close()
-print(f"Saved error plot to {save_path}")
+# fig = plt.figure(figsize=(16, 8))
+# plt.plot(time_axis, error_per_frame, label='MPJPE (Mean Per Joint Position Error)', color='red', linewidth=2)
+# plt.title(f'Averaged Prediction Error Over Time for {prefix}', fontsize=24)
+# plt.xlabel('Prediction Frame Number', fontsize=20)
+# plt.ylabel('Average Joint Error (Meters)', fontsize=20)
+# plt.grid(True, alpha=0.3)
+
+# # Increase X-axis tick label size
+# plt.xticks(fontsize=12) 
+# plt.yticks(fontsize=12)
+
+# plt.fill_between(time_axis, lower_bound, upper_bound, color='red', alpha=0.1, label='Standard Deviation (±1$\sigma$)')
+# plt.legend(loc='upper left', fontsize=12)
+
+
+
+# plt.savefig(save_path, dpi=100)
+# plt.close()
+# print(f"Saved error plot to {save_path}")

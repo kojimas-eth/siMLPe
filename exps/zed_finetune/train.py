@@ -5,6 +5,8 @@ import torch
 import numpy as np
 import json
 import copy
+
+
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 # 1. Get the path of the current file
@@ -13,9 +15,10 @@ project_root = current_file.parent.parent.parent
 if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
-
+from exps.baseline_h36m.test import test
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument('--exp-name', type=str, default='zed_finetune', help='experiment name')
+parser.add_argument('--exp-name', 
+type=str, default='zed_finetune', help='experiment name')
 parser.add_argument('--seed', type=int, default=888, help='=seed')
 parser.add_argument('--temporal-only', action='store_true', help='=temporal only')
 parser.add_argument('--layer-norm-axis', type=str, default='spatial', help='=layernorm axis')
@@ -32,12 +35,12 @@ writer = SummaryWriter()
 acc_log.write(''.join('Seed : ' + str(args.seed) + '\n'))
 
 from exps.baseline_h36m.model import siMLPe as Model
-from exps.baseline_h36m.train import get_dct_matrix, update_lr_multistep , gen_velocity
+from exps.baseline_h36m.train import get_dct_matrix , gen_velocity
 
 
 
 from config import config
-config.motion.h36m_target_length = config.motion.h36m_target_length_eval
+config.motion.h36m_target_length = config.motion.h36m_target_length_train
 
 from datasets.zed import ZEDDataset 
 from utils.logger import get_logger, print_and_log_info
@@ -47,6 +50,16 @@ dct_m,idct_m = get_dct_matrix(config.motion.h36m_input_length_dct)
 dct_m = torch.tensor(dct_m).float().cuda().unsqueeze(0)
 idct_m = torch.tensor(idct_m).float().cuda().unsqueeze(0)
 
+def update_lr_multistep(nb_iter, total_iter, max_lr, min_lr, optimizer) :
+    if nb_iter > 25000:
+        current_lr = 8e-7
+    else:
+        current_lr = 1e-6
+
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = current_lr
+
+    return optimizer, current_lr
 
 def train_step(h36m_motion_input, h36m_motion_target, model, optimizer, nb_iter, total_iter, max_lr, min_lr) :
 
@@ -103,10 +116,9 @@ if config.model_pth is not None:
     new_state_dict = OrderedDict()
     
     for k, v in state_dict.items():
-        # Step A: Remove 'module.' prefix (from DataParallel training)
         name = k.replace("module.", "")
-        
-        # Step B: Rename 'motion_transformer' to 'motion_mlp' (Legacy compatibility)
+
+        #Rename 'motion_transformer' to 'motion_mlp' (Legacy compatibility)
         if name.startswith("motion_transformer.transformer"):
             name = name.replace("motion_transformer.transformer", "motion_mlp.mlps")
             
@@ -126,6 +138,12 @@ else:
 dataset = ZEDDataset(config, 'train', data_aug=True)
 dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True, drop_last=True)
 
+eval_config = copy.deepcopy(config)
+eval_config.motion.h36m_target_length = eval_config.motion.h36m_target_length_eval
+eval_dataset = ZEDDataset(eval_config, 'test', data_aug = False)
+eval_dataloader = DataLoader(eval_dataset, batch_size=config.batch_size, shuffle=False, drop_last=True)
+
+
 # 4. Optimizer (Fine-tuning usually requires smaller LR, set in config)
 optimizer = torch.optim.Adam(model.parameters(), lr=config.cos_lr_max, weight_decay=config.weight_decay)
 
@@ -135,8 +153,6 @@ nb_iter = 0
 
 while nb_iter < config.cos_lr_total_iters:
     for (input_motion, target_motion) in dataloader:
-        # Reuse the train_step logic from the original script
-        # Ensure 'dct_m' and 'idct_m' are defined or passed correctly if using the imported function
         #Trains step expects input (b,n,22,3)
         loss, optimizer, current_lr = train_step(input_motion, target_motion, model, optimizer, nb_iter, config.cos_lr_total_iters, config.cos_lr_max, config.cos_lr_min)
         
@@ -146,7 +162,46 @@ while nb_iter < config.cos_lr_total_iters:
         if nb_iter % config.save_every == 0:
             if not os.path.exists(config.snapshot_dir):
                 os.makedirs(config.snapshot_dir, exist_ok=True)
-            torch.save(model.state_dict(), config.snapshot_dir + f'/zed_finetuned_{nb_iter}.pth')
+            torch.save(model.state_dict(), config.snapshot_dir + f'/fixed_world_zed_finetuned_{nb_iter}.pth')
+        
+        #Evaluation 
+        if (nb_iter + 1) % config.save_every ==  0 :
+            model.eval()
+            val_losses = []
+        
+            with torch.no_grad(): # No gradients needed for testing
+                for (val_input, val_target) in eval_dataloader:
+                    if config.deriv_input:
+                        val_input_ = torch.matmul(dct_m[:, :, :config.motion.h36m_input_length], val_input.cuda())
+                    else:
+                        val_input_ = val_input.clone()
+                    val_pred = model(val_input_.cuda())
+                    val_pred = torch.matmul(idct_m[:, :config.motion.h36m_input_length, :], val_pred)
+
+
+                    #compute loss
+                    b, n, c = val_target.shape
+                    num_joints = c // 3
+
+                    
+                    if config.deriv_output:
+                        offset = val_input[:, -1:].cuda()
+                        # Use 'n' instead of config.motion.h36m_target_length_eval
+                        val_pred = val_pred[:, :n] + offset
+                    else:
+                        val_pred = val_pred[:, :n]
+
+                    # Reshape to (Batch, Time, Joints, 3)
+                    pred_phys = val_pred.reshape(b, n, num_joints, 3)
+                    gt_phys = val_target.cuda().reshape(b, n, num_joints, 3)
+                    dist = torch.norm(pred_phys - gt_phys, dim=3) # (B, T, J)
+                    val_losses.append(dist.mean().item())
+
+            avg_val_loss = np.mean(val_losses)
+            print(f"\n[Validation] Iter {nb_iter}: MPJPE Loss = {avg_val_loss:.4f} meters")
+            writer.add_scalar('Loss/validation', avg_val_loss, nb_iter)
+            
+            model.train()
         
         nb_iter += 1
         if nb_iter >= config.cos_lr_total_iters:

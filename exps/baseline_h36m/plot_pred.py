@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d import Axes3D 
-from matplotlib import animation as animation
+from matplotlib import animation as animation, ticker
 import json
 import math
 
@@ -563,14 +563,26 @@ def animate_trajectory_zed(vis_input, vis_target, vis_pred, skeleton_edges, inte
     y_min, y_max = all_data[:, :, 2].min(), all_data[:, :, 2].max() 
     z_min, z_max = all_data[:, :, 1].min(), all_data[:, :, 1].max() 
     
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+    z_range = z_max - z_min
+
     for ax in [ax1, ax2]:
-        ax.set_xlim(x_min, x_max)
-        ax.set_ylim(y_min, y_max)
-        ax.set_zlim(z_min, z_max)
+        # ax.set_xlim(x_min, x_max)
+        # ax.set_ylim(y_min, y_max)
+        # ax.set_zlim(z_min, z_max)
+        ax.set_xlim(-1.0, 1.0)
+        ax.set_ylim(-1.0, 1.0)
+        ax.set_zlim(-1.0, 1.0)
+        # ax.set_box_aspect((x_range, y_range, z_range))
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
         ax.set_zlabel('Z')
         ax.view_init(elev=20, azim=45)
+        ax.yaxis.set_major_locator(ticker.MaxNLocator(5))
+        ax.xaxis.set_major_locator(ticker.MaxNLocator(5))
+        ax.zaxis.set_major_locator(ticker.MaxNLocator(5))
+
 
     # 4. Initialize Line Objects
     # We create a list of line objects for every edge in the skeleton
@@ -613,7 +625,7 @@ def animate_trajectory_zed(vis_input, vis_target, vis_pred, skeleton_edges, inte
         fig, update, frames=total_frames, interval=interval, blit=False
     )
     anim.save(f'plots/{source_file}_{sample}.mp4', writer='ffmpeg', fps=10)
-    # anim.save(f'plots/{source_number}_original_source_{sample}.mp4', writer='ffmpeg', fps=10)
+    # anim.save(f'plots/h36m_original.mp4', writer='ffmpeg', fps=10)
 
 def load_zed_json_3d(json_path, target_body_id=None):
     """
@@ -752,20 +764,242 @@ def plot_prediction_error(input, pred, truth):
     plt.close()
     print(f"Saved error plot to plots/{filename}")
 
+def animate_trajectory_zed_together(vis_input, vis_target, vis_pred, skeleton_edges, interval=100, source_file="output", sample="0", root = False):
+    """
+    Creates a 3D animation with both skeletons overlapping in the same graph:
+    - Ground Truth (Input -> Target)
+    - Prediction (Input -> Prediction)
+    """
+    
+    # 1. Prepare Data
+    seq_gt = np.concatenate([vis_input, vis_target], axis=0)
+    seq_pred = np.concatenate([vis_input, vis_pred], axis=0)
+    
+    print("GT Shape:", seq_gt.shape, "Pred Shape:", seq_pred.shape)
+
+    input_len = vis_input.shape[0]
+    total_frames = seq_gt.shape[0]
+
+    # 2. Setup Figure
+    fig = plt.figure(figsize=(10, 10)) # Adjusted figsize for a single square-ish plot
+    ax1 = fig.add_subplot(1, 1, 1, projection='3d') # Changed to 1x1 grid
+    
+    # Titles
+    ax1.set_title("Prediction vs Ground Truth\n(Blue=Input, Green=GT Output, Red=Pred Output)")
+
+    # 3. Helper to determine global axis limits
+    all_data = np.concatenate([seq_gt, seq_pred], axis=0)
+    x_min, x_max = all_data[:, :, 0].min(), all_data[:, :, 0].max()
+    y_min, y_max = all_data[:, :, 2].min(), all_data[:, :, 2].max() 
+    z_min, z_max = all_data[:, :, 1].min(), all_data[:, :, 1].max() 
+    
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+    z_range = z_max - z_min
+    max_range = max(x_range, y_range, z_range) /2
+    mid_vals = [(x_max + x_min) / 2, (z_max + z_min) / 2, (y_max + y_min) / 2]
+    margin = 0.2 * max(x_range, y_range, z_range)  # Add 20% margin
+
+    # Removed ax2 from the loop
+    for ax in [ax1]:
+
+
+        ax.set_xlim(mid_vals[0] - max_range - margin, mid_vals[0] + max_range + margin)
+        ax.set_ylim(mid_vals[2] - max_range - margin, mid_vals[2] + max_range + margin)
+        ax.set_zlim(mid_vals[1] - max_range - margin, mid_vals[1] + max_range + margin)
+        
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.view_init(elev=20, azim=45)
+        ax.yaxis.set_major_locator(ticker.MaxNLocator(5))
+        ax.xaxis.set_major_locator(ticker.MaxNLocator(5))
+        ax.zaxis.set_major_locator(ticker.MaxNLocator(5))
+    # 4. Initialize Line Objects
+    # Both lines_gt and lines_pred are now plotted on ax1
+    # Added a dashed linestyle to pred so you can see overlapping blue input frames
+    lines_gt = [ax1.plot([], [], [], linewidth=2)[0] for _ in skeleton_edges]
+    lines_pred = [ax1.plot([], [], [], linewidth=2, linestyle='--')[0] for _ in skeleton_edges]
+
+    def update(frame):
+        # Determine current color based on phase (Input vs Output)
+        if frame < input_len:
+            color_gt = 'blue'
+            color_pred = 'blue'
+            phase = "Input"
+        else:
+            color_gt = 'green'
+            color_pred = 'red'
+            phase = "Future"
+
+        # Update Ground Truth Skeleton
+        current_pose_gt = seq_gt[frame]
+        for line, (p1, p2) in zip(lines_gt, skeleton_edges):
+            line.set_data([current_pose_gt[p1, 0], current_pose_gt[p2, 0]], 
+                          [current_pose_gt[p1, 2], current_pose_gt[p2, 2]]) # Swap Y/Z
+            line.set_3d_properties([current_pose_gt[p1, 1], current_pose_gt[p2, 1]])
+            line.set_color(color_gt)
+
+        # Update Prediction Skeleton
+        current_pose_pred = seq_pred[frame]
+        for line, (p1, p2) in zip(lines_pred, skeleton_edges):
+            line.set_data([current_pose_pred[p1, 0], current_pose_pred[p2, 0]], 
+                          [current_pose_pred[p1, 2], current_pose_pred[p2, 2]]) # Swap Y/Z
+            line.set_3d_properties([current_pose_pred[p1, 1], current_pose_pred[p2, 1]])
+            line.set_color(color_pred)
+            
+        fig.suptitle(f"Frame: {frame} ({phase})", fontsize=14)
+        return lines_gt + lines_pred
+    if root:
+        source_file = f"{source_file}_root_zeroed"
+    # 5. Create Animation
+    anim = animation.FuncAnimation(
+        fig, update, frames=total_frames, interval=interval, blit=False
+    )
+    anim.save(f'plots_fixed/{source_file}_{sample}.mp4', writer='ffmpeg', fps=10)
+    print(f"animation saved at plots_fixed/{source_file}_{sample}.mp4")
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+import matplotlib.ticker as ticker
+
+def animate_multiple_pred_together(vis_input, vis_target, vis_preds, skeleton_edges, pred_names=None, interval=100, source_file="output", sample="0"):
+    """
+    Creates a 3D animation with multiple skeletons overlapping in the same graph:
+    - Ground Truth (Input -> Target)
+    - Predictions (Input -> Prediction 1, Prediction 2, etc.)
+    
+    vis_preds: A list of prediction arrays, e.g., [pred_model_A, pred_model_B]
+    pred_names: A list of strings to label the predictors in the title.
+    """
+    
+    # 1. Prepare Data
+    seq_gt = np.concatenate([vis_input, vis_target], axis=0)
+    
+    # Create continuous sequences for *each* prediction passed in
+    seq_preds = [np.concatenate([vis_input, p], axis=0) for p in vis_preds]
+
+    input_len = vis_input.shape[0]
+    total_frames = seq_gt.shape[0]
+
+    # 2. Setup Figure
+    fig = plt.figure(figsize=(10, 10))
+    ax1 = fig.add_subplot(1, 1, 1, projection='3d')
+    
+    # Assign distinct colors and styles for up to 3 predictors (add more if needed)
+    pred_colors = ['red', 'blue', 'purple'] 
+    linestyles = ['-', '-', '-.'] 
+    
+    if pred_names is None:
+        pred_names = [f"Pred {i+1}" for i in range(len(vis_preds))]
+        
+    # Dynamic Title creation
+    title_str = "Prediction vs Ground Truth\n(Blue=Input, Green=GT Output"
+    for name, color in zip(pred_names, pred_colors[:len(vis_preds)]):
+        title_str += f", {color.capitalize()}={name}"
+    title_str += ")"
+    ax1.set_title(title_str, fontsize=11)
+
+    # 3. Helper to determine global axis limits
+    # Concatenate GT and ALL predictions to find the true min/max bounds
+    all_data_list = [seq_gt] + seq_preds
+    all_data = np.concatenate(all_data_list, axis=0) # Shape: (total_frames, num_joints, 3)
+    
+    # Find the global min and max across all frames and joints for X, Y, Z
+    min_vals = np.min(all_data, axis=(0, 1))
+    max_vals = np.max(all_data, axis=(0, 1))
+    
+    # Find the center point of all data
+    mid_vals = (max_vals + min_vals) / 2.0
+    
+    # Find the largest spread across any dimension to keep the 3D aspect ratio cubic
+    max_range = np.max(max_vals - min_vals) / 2.0
+    margin = max_range * 0.1 # Add a 10% padding so the skeleton doesn't touch the edges
+    
+    for ax in [ax1]:
+        # Based on your update() function mapping: 
+        # Matplotlib X = Data X (index 0)
+        # Matplotlib Y = Data Z (index 2)
+        # Matplotlib Z = Data Y (index 1)
+        ax.set_xlim(mid_vals[0] - max_range - margin, mid_vals[0] + max_range + margin)
+        ax.set_ylim(mid_vals[2] - max_range - margin, mid_vals[2] + max_range + margin)
+        ax.set_zlim(mid_vals[1] - max_range - margin, mid_vals[1] + max_range + margin)
+        
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.view_init(elev=20, azim=45)
+        ax.yaxis.set_major_locator(ticker.MaxNLocator(5))
+        ax.xaxis.set_major_locator(ticker.MaxNLocator(5))
+        ax.zaxis.set_major_locator(ticker.MaxNLocator(5))
+
+    # 4. Initialize Line Objects
+    lines_gt = [ax1.plot([], [], [], linewidth=2)[0] for _ in skeleton_edges]
+    
+    # Create a list of lists to hold the line objects for *each* prediction
+    lines_preds = []
+    for i in range(len(vis_preds)):
+        style = linestyles[i % len(linestyles)]
+        # alpha=0.7 makes overlapping lines slightly transparent so you can see all of them
+        lines_preds.append([ax1.plot([], [], [], linewidth=2, linestyle=style, alpha=0.7)[0] for _ in skeleton_edges])
+
+    def update(frame):
+        if frame < input_len:
+            color_gt = 'blue'
+            current_pred_colors = ['blue'] * len(vis_preds)
+            phase = "Input"
+        else:
+            color_gt = 'green'
+            current_pred_colors = pred_colors[:len(vis_preds)]
+            phase = "Future"
+
+        # Update Ground Truth Skeleton
+        current_pose_gt = seq_gt[frame]
+        for line, (p1, p2) in zip(lines_gt, skeleton_edges):
+            line.set_data([current_pose_gt[p1, 0], current_pose_gt[p2, 0]], 
+                          [current_pose_gt[p1, 2], current_pose_gt[p2, 2]]) 
+            line.set_3d_properties([current_pose_gt[p1, 1], current_pose_gt[p2, 1]])
+            line.set_color(color_gt)
+
+        # Update ALL Prediction Skeletons
+        for p_idx, seq_pred in enumerate(seq_preds):
+            current_pose_pred = seq_pred[frame]
+            for line, (p1, p2) in zip(lines_preds[p_idx], skeleton_edges):
+                line.set_data([current_pose_pred[p1, 0], current_pose_pred[p2, 0]], 
+                              [current_pose_pred[p1, 2], current_pose_pred[p2, 2]]) 
+                line.set_3d_properties([current_pose_pred[p1, 1], current_pose_pred[p2, 1]])
+                line.set_color(current_pred_colors[p_idx])
+            
+        fig.suptitle(f"Frame: {frame} ({phase})", fontsize=14)
+        
+        # Flatten the list of lists into a single list of line objects for FuncAnimation
+        all_pred_lines = [line for sublist in lines_preds for line in sublist]
+        return lines_gt + all_pred_lines
+    
+    test_name = "_".join(source_file.split("_")[:2])
+    # 5. Create Animation
+    anim = animation.FuncAnimation(
+        fig, update, frames=total_frames, interval=interval, blit=False
+    )
+    anim.save(f'plots/comparison/compare_{test_name}_{pred_names[0]}_{pred_names[1]}_{sample}.mp4', writer='ffmpeg', fps=10)
+    print(f"animation saved at plots/comparison/compare_{test_name}_{pred_names[0]}_{pred_names[1]}_{sample}.mp4")
 
 ##################################
 # MAIN CODE
 ##################################
-zed = True #If using data from zed inference
+zed = True #If using data from zed
 root = True #If using data with everything zeroed
-source_number = 1
-source_file = "30fps_body34_med_sit_1"
-# source_file = "sanity_check"
-sample = 40 #which frame to analyze
+second_data = False #If you want to load a second set of data to compare (e.g. finetune vs original)
+prefix = "fix_finetune" #"KF", "original", "finetune"
+source_number = "1"
+source_file = f"moving_arm_{source_number}_{prefix}" #Rememeber to change data load if using simple prediction!
+sample = 0 #which frame to analyze
 pred_length = 60
 
 if zed:
-    data = np.load(f"zed_inference_results_{source_file}.npz")
+    data = np.load(f"predictions_fix/{prefix}/{source_file}.npz")
+    # data = np.load(f"../zed_finetune/predictions/KF/{source_file}.npz")
     # data = np.load("sanity_check.npz")
     print(f"Loaded {len(data['inputs'])} samples from zed_inference_results_{source_file}.npz")
 else:
@@ -797,9 +1031,10 @@ else:
 input_time = inputs.shape[1]
 pred_time = preds.shape[1]
 num_joints = inputs.shape[2]
+print("pred shape",preds.shape)
 print("The shapes of input pred and joints are",input_time, pred_time, num_joints)
-
-
+print(f"The distance between neck and hips in input is {inputs[0,0,0,:]-inputs[0,0,1,:]}")
+print(f"The distance between knee and ankle in pred is {preds[0,0,0,:]-preds[0,0,1,:]}")
 if root:
     inputs = data['zero_input']   # (N, 50, 22, 3)
     preds = data['zero_output'] # (N, 25, 22, 3)
@@ -816,15 +1051,13 @@ total_samples = inputs.shape[0]
 
 # 1. Simple Case: Prediction is shorter than input window
 if pred_length <= input_time:
-    # Logic: Start at 'sample + 50', take the first 'pred_length' frames
-    # Safety: Ensure we don't go off the end of the dataset
     target_start_idx = sample + input_time
     
     if target_start_idx < total_samples:
         vis_target = inputs[target_start_idx, :pred_length, :, :]
     else:
         print("End of dataset reached, cannot fetch GT.")
-        vis_target = np.zeros((pred_length, 22, 3)) # Placeholder
+        vis_target = np.zeros((pred_length, 22, 3)) 
 
 # 2. Complex Case: Prediction is longer than input window (Stitching)
 else:
@@ -835,26 +1068,33 @@ else:
     
     # A. Collect full 50-frame windows
     for i in range(num_full_windows):
-        # We step forward by 50 frames for each chunk
-        # Chunk 0 starts at sample+50
-        # Chunk 1 starts at sample+100
         idx = sample + input_time + (i * input_time)
         
         if idx < total_samples:
-            target_chunks.append(inputs[idx, :, :, :]) # Take full 50 frames
+            target_chunks.append(inputs[idx, :, :, :]) 
         else:
             target_chunks.append(np.zeros((50, 22, 3))) # Padding if end of file
             
     # B. Collect the remainder (if any)
+    # if remainder > 0:
+    #     idx = sample + input_time + (num_full_windows * input_time)
+
+    #     if idx < total_samples:
+    #         # Take the FIRST 'remainder' frames of this window
+    #         target_chunks.append(inputs[idx, :remainder, :, :]) 
+    #     else:
+    #         target_chunks.append(np.zeros((remainder, 22, 3)))
+    #         print("No more datasets available, resulting to 0s")
+
     if remainder > 0:
-        idx = sample + input_time + (num_full_windows * input_time)
+        idx = sample + remainder + (num_full_windows * input_time)
 
         if idx < total_samples:
-            # Take the FIRST 'remainder' frames of this window
-            target_chunks.append(inputs[idx, :remainder, :, :]) 
+            # Take the LAST 'remainder' frames of this window
+            target_chunks.append(inputs[idx, -remainder:, :, :]) 
         else:
             target_chunks.append(np.zeros((remainder, 22, 3)))
-
+            print("No more datasets available, resulting to 0s")
     # C. Stitch them together
     vis_target = np.concatenate(target_chunks, axis=0)
 
@@ -862,17 +1102,56 @@ else:
 print(f"Target Shape: {vis_target.shape}") # Should be (pred_length, 22, 3)
 
 
+###### Now load 2nd Data #######
+if second_data:
+    prefix2 = "fix_original" #"fix_original", "original", "finetune"
+    source_file2 = f"test_{source_number}_{prefix2}" #Rememeber to change data load if using simple prediction!
 
-#only take frist 10 frames
-# plot_trajectory_zed(vis_input,vis_target,vis_pred,plot_length=10, highlight_frame=3)
-# vis_target = vis_target[0:10, :, :]
-# vis_pred = vis_pred[0:10, :, :]
-# print(vis_input.shape, vis_target.shape, vis_pred.shape)
+    if zed:
+        data2 = np.load(f"predictions_fix/{prefix2}/{source_file2}.npz")
+        # data = np.load(f"../zed_finetune/predictions/KF/{source_file}.npz")
+        # data = np.load("sanity_check.npz")
+        print(f"Loaded {len(data2['inputs'])} samples from zed_inference_results_{source_file2}.npz")
+    else:
+        data2 = np.load("results_dump.npz")
+        print(f"Loaded {len(data2['inputs'])} samples from results_dump.npz")
+
+
+    # Extract arrays
+    if zed:
+        inputs2 = data2['inputs']   # (Total Sample, 50, 22, 3)
+        preds2 = data2['preds']     # (Total Sample, pred length, 22, 3)
+        print("The shapes of input, preds and target are",inputs2.shape, preds2.shape)
+    if root:
+        inputs2 = data2['zero_input']   # (N, 50, 22, 3)
+        preds2 = data2['zero_output'] # (N, 25, 22, 3)
+        
+        vis_input2= inputs2[sample]   # (50, 22, 3)
+        vis_pred2= preds2[sample]     # (25, 22, 3  )
+
+    else:
+        vis_input2=  inputs2[sample]   # (50, 32, 3)
+        vis_pred2= preds2[sample]     # (25, 32, 3)
+    
+
 
 ###### Create Animation of specific frame and create plot of all 22 joints ###### 
-# animate_trajectory_zed(vis_input, vis_target, vis_pred, SKELETON_EDGES_22)
+
+
+if second_data:
+    animate_multiple_pred_together(
+        vis_input, 
+        vis_target, 
+        vis_preds=[vis_pred, vis_pred2],          # Pass them as a list!
+        skeleton_edges=SKELETON_EDGES_22,
+        pred_names=["Fix Finetuned", "Fix Original"],                  # Optional: Name them for the title
+        source_file=source_file, 
+        sample=sample
+    )
+else:
+    animate_trajectory_zed_together(vis_input, vis_target, vis_pred, SKELETON_EDGES_22, source_file=source_file, sample=sample, root=root)
 # plot_2d_trajectory_separated(vis_input,vis_target, vis_pred, sample)
-plot_prediction_error(vis_input, vis_pred, vis_target)
+# plot_prediction_error(vis_input, vis_pred, vis_target)
 
 
 # plot_trajectory_h36m(vis_input, vis_target, vis_pred)
@@ -880,6 +1159,6 @@ plot_prediction_error(vis_input, vis_pred, vis_target)
 # plot_single_skeleton_zed(vis_input)
 
 ######## Plot the entire raw data for check ##########
-# source_path = "/home/sosuke/thesis/siMLPe/data/zed_data/30fps_body34_med_rhand_1.json"
+# source_path = "/home/sosuke/thesis/siMLPe/data/jan16/34f_walk_1.json"
 # zed_sequence = load_zed_json_3d(source_path)
-# animate_raw_zed_sequence(zed_sequence, SKELETON_EDGES_ZED_34, output_path="zed_raw_movement.mp4")
+# animate_raw_zed_sequence(zed_sequence, SKELETON_EDGES_ZED_34, output_path="raw_walk_movement.mp4")

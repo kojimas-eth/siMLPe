@@ -22,48 +22,59 @@ joint_used_xyz = np.array([2,3,4,5,7,8,9,10,12,13,14,15,17,18,19,21,22,25,26,27,
 
 config.motion.h36m_target_length = config.motion.h36m_target_length_eval
 
-#load ZED data
-source_number = 2
-source = f"/home/sosuke/thesis/siMLPe/data/zed_data/30fps_body34_fast_{source_number}.json"
-if source.endswith('.json') or source.endswith('.jsonl'):
-    with open(source, 'r') as file:
-        zed_data = json.load(file)
-
-zed_data =np.load(f"/home/sosuke/thesis/siMLPe/exps/baseline_h36m/zed_inference_results_{source_number}_norot_extrapolate.npz")
-
+########################
+#Loading zed data #1
+########################
+# zed_data =np.load(f"predictions/constrain_original/34f_arm_4_constrain_original.npz")
+zed_data =np.load(f"predictions/original/34f_test_tilt_world_original.npz")
 zed_input = zed_data['inputs']
 zero_input = zed_data['zero_input']   # (N, 50, 22, 3)
-
-zed_zero_input = zero_input[0]
+zed_zero_input = zero_input[50]
 zed_zero_input_22= zed_zero_input[-1]
 print("zed input", zed_zero_input_22.shape)
 
-zed_rotated = zed_zero_input_22.copy()
-# 2. Apply the rotation 
-# New X = Old X
-# zed_rotated[:, 0] = zed_zero_input_22[:, 0]
-# # New Y = -Old Z ("negative z of zed should become positive y")
-# zed_rotated[:, 1] = -zed_zero_input_22[:, 2]
-# # New Z = Old Y ("zed positive y to become h36's positive z")
-# zed_rotated[:, 2] = zed_zero_input_22[:, 1]
+zed_output = zed_data['zero_output']
+zed_zero_output = zed_output[100]
+zed_zero_output_22= zed_zero_output[10]
+print("zed output", zed_zero_output_22.shape)
 
-#Load H36 data
-h36data = np.loadtxt("/home/sosuke/thesis/siMLPe/data/h36m/S5/discussion_1.txt", delimiter=",")
-print(f"Loaded shape: {h36data.shape}")
-dataset = H36MEval(config, 'test')
-input,output = dataset[0]
+
+########################
+#Loading zed data #2
+########################
+# zed_data2 =np.load(f"predictions/finetune/34f_test_world_finetune.npz")
+zed_data2 =np.load(f"predictions/original/34f_test_tilt_cam_original.npz")
+zed_input2 = zed_data2['inputs']
+zero_input2 = zed_data2['zero_input']   # (N, 50, 22, 3)
+zed_zero_input2 = zero_input2[50]
+zed_zero_input_22_2= zed_zero_input2[-1]
+print("zed 2 input", zed_zero_input_22_2.shape)
+
+zed_output2 = zed_data2['zero_output']
+zed_zero_output2 = zed_output2[0]
+zed_zero_output_22_2= zed_zero_output2[10]
+print("zed 2 output", zed_zero_output_22_2.shape)
+
+########################
+#Loading H36M data
+########################
+dataset = H36MEval(config, 'train')
+print("H36M dataset length:", len(dataset))
+input,output = dataset[1000]
+input2,output2 = dataset[3000]
+print("input shape",input.shape)
 
 h36_input = input[0,:,:]
+h36_output = output[0,:,:]
 h36_22_input = h36_input[joint_used_xyz,:]
+h36_22_output = h36_output[joint_used_xyz,:]
+h36_input2 = input2[0,:,:]
+h36_22_input2 = h36_input2[joint_used_xyz,:]
+
 print("h36 input", h36_22_input.shape)
 
 
 
-
-
-
-
-# --- 1. Define Connectivity ---
 SKELETON_EDGES_22 = [
     # --- Right Leg (Starts at Knee) ---
     (0, 1),   # RKnee -> RAnkle
@@ -95,7 +106,7 @@ SKELETON_EDGES_22 = [
     (20, 21)  # RHand -> RTip
 ]
 
-def plot_skeleton(ax, data, title, edges=SKELETON_EDGES_22):
+def plot_skeleton(ax, data, title, color='blue', label=None, edges=SKELETON_EDGES_22):
     """
     Plots a single skeleton (22 joints).
     data: (22, 3) array-like (numpy or torch)
@@ -109,14 +120,14 @@ def plot_skeleton(ax, data, title, edges=SKELETON_EDGES_22):
     zs = data[:, 2]
 
     # 1. Plot Joints (Dots)
-    ax.scatter(xs, ys, zs, c='red', s=20, marker='o')
+    ax.scatter(xs, ys, zs, c='red', s=20, marker='o',label=label)
 
     # 2. Plot Bones (Lines)
     for start, end in edges:
         if start < len(data) and end < len(data):
             ax.plot([xs[start], xs[end]], 
                     [ys[start], ys[end]], 
-                    [zs[start], zs[end]], c='blue')
+                    [zs[start], zs[end]], c=color, alpha = 0.7)
         
     # 3. Annotate Indices (useful for debugging)
     for i in range(len(data)):
@@ -136,27 +147,44 @@ def plot_skeleton(ax, data, title, edges=SKELETON_EDGES_22):
     ax.set_xlim(mid_x - max_range, mid_x + max_range)
     ax.set_ylim(mid_y - max_range, mid_y + max_range)
     ax.set_zlim(mid_z - max_range, mid_z + max_range)
-# --- 2. Run the Plotting ---
 
-# Assuming your variables from the prompt:
-# zed_input (numpy array): shape (22, 3)
-# h36_input (torch tensor): shape (22, 3)
+#Define what you want to plot
+plot_1 = zed_zero_output_22
+# plot_2 = h36_22_input
+# plot_2 = zed_zero_input_22_2
+plot_3=h36_22_output
 
-# If zed_input is (N, 22, 3) or similar, take the first frame:
-# zed_to_plot = zed_input[0] if zed_input.ndim == 3 else zed_input 
-# For now, assuming you have the (22,3) frame ready:
-# zed_to_plot = zed_zero_input_22  
-zed_to_plot = zed_rotated
-h36_to_plot = h36_22_input
+# Ensure both are numpy for the limit calculation
+d1,d2,d3 = None,None,None
+d1 = plot_1.detach().cpu().numpy() if isinstance(plot_1, torch.Tensor) else plot_1
+# d2 = plot_2.detach().cpu().numpy() if isinstance(plot_2, torch.Tensor) else plot_2
+d3 = plot_3.detach().cpu().numpy() if isinstance(plot_3, torch.Tensor) else plot_3
 
-fig = plt.figure(figsize=(12, 6))
-# Plot ZED Input
-ax1 = fig.add_subplot(121, projection='3d')
-plot_skeleton(ax1, zed_to_plot, "ZED Data (22 Joints)")
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection='3d')
+if d1 is not None:
+    plot_skeleton(ax, d1, "ZED world (Red) vs ZED cam (Blue)", color='red', label='ZED Data')
+if d2 is not None:
+    plot_skeleton(ax, d2, "ZED world (Red) vs ZED cam (Blue)", color='blue', label='H36M Data')
+if d3 is not None:
+    plot_skeleton(ax, d3, "ZED (Red) vs H36M (Green)", color='green', label='ZED Output Data')
 
-# Plot H36M Input
-ax2 = fig.add_subplot(122, projection='3d')
-plot_skeleton(ax2, h36_to_plot, "H36M Data (22 Joints)")
+valid_data = [d for d in [d1,d2,d3] if d is not None]
+all_data = np.vstack(valid_data)
+
+max_range = np.array([
+    all_data[:,0].max() - all_data[:,0].min(), 
+    all_data[:,1].max() - all_data[:,1].min(), 
+    all_data[:,2].max() - all_data[:,2].min()
+]).max() / 2.0
+
+mid_x = (all_data[:,0].max() + all_data[:,0].min()) * 0.5
+mid_y = (all_data[:,1].max() + all_data[:,1].min()) * 0.5
+mid_z = (all_data[:,2].max() + all_data[:,2].min()) * 0.5
+
+ax.set_xlim(mid_x - max_range, mid_x + max_range)
+ax.set_ylim(mid_y - max_range, mid_y + max_range)
+ax.set_zlim(mid_z - max_range, mid_z + max_range)
 
 plt.tight_layout()
 plt.show()
