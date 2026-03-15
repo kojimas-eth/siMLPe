@@ -70,9 +70,11 @@ class GlobalTrajectoryExtrapolator:
         # Convert to rotation vector (direction is axis, magnitude is angle)
         # Divide by dt to get angular velocity
         current_angular_vel = r_diff.as_rotvec() / self.dt
-        
+        current_angular_vel[0] = 0.0 # Zero out X-axis rotation
+        current_angular_vel[2] = 0.0 # Zero out Z-axis rotation
+
         # Smooth the angular velocity (Simple Exponential Smoothing)
-        alpha = 0.3 # Smoothing factor (0.0 = completely ignore new, 1.0 = completely trust new)
+        alpha = 0.6 # Smoothing factor (0.0 = completely ignore new, 1.0 = completely trust new)
         self.angular_velocity = (alpha * current_angular_vel) + ((1 - alpha) * self.angular_velocity)
         self.last_quat = observed_quat
 
@@ -86,7 +88,6 @@ class GlobalTrajectoryExtrapolator:
         future_positions = []
         future_quats = []
         
-        # Clone current state so we don't mess up the actual filter
         current_x = self.x.copy()
         current_r = R.from_quat(self.last_quat)
         

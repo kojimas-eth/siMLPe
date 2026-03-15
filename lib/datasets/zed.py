@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.utils.data as data
 import random
+from scipy.spatial.transform import Rotation as R
 
 class ZEDDataset(data.Dataset):
     def __init__(self, config, split_name, data_aug=False):
@@ -64,11 +65,14 @@ class ZEDDataset(data.Dataset):
                 sorted_timestamps = sorted(data.keys(), key=lambda x: int(x))
     
                 zed_keypoints = []
+                zed_quats = []
                 
                 for ts in sorted_timestamps[:-30]:
                     frame_data = data[ts]
                     #skip no body frames
                     if not frame_data.get('body_list'):
+                        if zed_keypoints:
+                            zed_keypoints.append(zed_keypoints[-1]) # Repeat last keypoint if no body detected
                         continue
 
                     target_body = frame_data['body_list'][0]
@@ -76,17 +80,29 @@ class ZEDDataset(data.Dataset):
                     raw_keypoint = target_body.get('keypoint')
                     np_keypoint = np.array(raw_keypoint)
                     zed_keypoints.append(np_keypoint)
+                    quat = target_body.get('global_root_orientation', [0.0, 0.0, 0.0, 1.0])
+                    zed_quats.append(quat)
             
 
                 zed_keypoints_np = np.array(zed_keypoints)  # (Total frames, 34, 3)
+                zed_quats_np = np.array(zed_quats)
+
                 h36m_32 = self.zed34_to_h36m32(zed_keypoints_np) # (Total frames, 32, 3)
                 root = h36m_32[:, 0:1, :] # Pelvis
                 h36m_rooted = h36m_32 - root
-                input_centered_22 = h36m_rooted[:, joint_used_xyz, :] # (50, 22, 3)
+
+                #Remove global rotation
+                rotations = R.from_quat(zed_quats_np)
                 
+                #H36M Treats Facing forward as +Y whilst zed is -Y!!!
+                correction_rot = R.from_euler('y', 180, degrees=True)
+                corrected_inv_rotations = correction_rot * rotations.inv()
+                inv_rot_matrices = corrected_inv_rotations.as_matrix()
+                h36m_derotated = np.einsum('tij,tkj->tki', inv_rot_matrices, h36m_rooted)
+
+                input_centered_22 = h36m_derotated[:, joint_used_xyz, :]
+
             
-            # The model expects inputs normalized
-            input_centered_22 = input_centered_22
             all_sequences.append(input_centered_22)
 
         final_dataset= np.concatenate(all_sequences, axis=0)

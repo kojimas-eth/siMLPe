@@ -6,6 +6,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from scipy.spatial.transform import Rotation as R
 from zed_finetune.simple_prediction import constrain_prediction, SKELETON_EDGES_22
 from  utils.kalman_filter import GlobalTrajectoryExtrapolator
+from  utils.extended_KF import MEKFTrajectoryExtrapolator
 import torch
 import json
 import time 
@@ -122,91 +123,14 @@ def zed34_to_h36m32(zed_data):
     h36m_data[:, 31, :] = zed_data[:, 16, :]
     return h36m_data
 
-def zed34_to_h36m32_flip(zed_data):
-    """
-    Converts ZED BODY_34 format to Human3.6M 32-joint format.
-    FLIPPED VERSION: Swaps Left <-> Right inputs from ZED.
-    
-    Args:
-        zed_data: Numpy array of shape (Frames, 34, 3) 
-                  
-    Returns:
-        h36m_data: Numpy array of shape (Frames, 32, 3)
-    """
-    frames = zed_data.shape[0]
-    h36m_data = np.zeros((frames, 32, 3))
-
-    # --- CENTER BODY (Root) ---
-    h36m_data[:, 0, :] = zed_data[:, 0, :]   # Pelvis -> Hip (Root)
-
-    # --- RIGHT LEG (Now using ZED LEFT indices) ---
-    # ZED Left Leg indices: 18 (Hip), 19 (Knee), 20 (Ankle), 21 (Heel/Site)
-    h36m_data[:, 1, :] = zed_data[:, 18 ,:]  # R Hip <- ZED Left Hip
-    h36m_data[:, 2, :] = zed_data[:, 19, :]  # R Knee <- ZED Left Knee
-    h36m_data[:, 3, :] = zed_data[:, 20, :]  # R Ankle <- ZED Left Ankle
-    h36m_data[:, 4, :] = zed_data[:, 21, :]  # R sites <- ZED Left Heel
-   
-    # Approx the toe location (Calculated from ZED Left side 21 & 32)
-    # ZED Index 32 is Left Toe Tip, 21 is Left Heel
-    r_heel = zed_data[:, 21, :] - zed_data[:, 32, :] 
-    r_vec_ankle_toe_dir = -r_heel
-    r_norm = np.linalg.norm(r_vec_ankle_toe_dir, axis=1, keepdims=True) + 1e-6
-    r_unit_vec = r_vec_ankle_toe_dir / r_norm
-
-    # h36m_data[:, 5, :] = zed_data[:, 21, :] + r_unit_vec * 1.5  # R toes
-    h36m_data[:, 5, :] = zed_data[:, 21, :]    
-    # --- LEFT LEG (Now using ZED RIGHT indices) ---
-    # ZED Right Leg indices: 22 (Hip), 23 (Knee), 24 (Ankle), 25 (Heel/Site)
-    h36m_data[:, 6, :] = zed_data[:, 22, :]  # L Hip <- ZED Right Hip
-    h36m_data[:, 7, :] = zed_data[:, 23, :]  # L Knee <- ZED Right Knee
-    h36m_data[:, 8, :] = zed_data[:, 24, :]  # L Ankle <- ZED Right Ankle
-    h36m_data[:, 9, :] = zed_data[:, 25, :]  # L sites <- ZED Right Heel
-    
-    # Approx the toe location (Calculated from ZED Right side 25 & 33)
-    # ZED Index 33 is Right Toe Tip, 25 is Right Heel
-    l_heel = zed_data[:, 25, :] - zed_data[:, 33, :] 
-    l_vec_ankle_toe_dir = -l_heel
-    l_norm = np.linalg.norm(l_vec_ankle_toe_dir, axis=1, keepdims=True) + 1e-6
-    l_unit_vec = l_vec_ankle_toe_dir / l_norm
-    # h36m_data[:, 10, :] = zed_data[:, 25, :] + l_unit_vec * 1.5 # L toes
-    h36m_data[:, 10, :] = zed_data[:, 25, :]
-    
-    # --- SPINE & HEAD (Unchanged) ---
-    h36m_data[:, 11, :] = zed_data[:, 1, :]  # Spine Navel -> Spine Low
-    h36m_data[:, 12, :] = zed_data[:, 2, :]  # Spine Chest -> Spine Torso
-    h36m_data[:, 13, :] = zed_data[:, 3, :]  # Neck -> Neck
-    h36m_data[:, 14, :] = zed_data[:, 26, :] # Head -> Head (Nose/Jaw)
-    h36m_data[:, 15, :] = zed_data[:, 27, :] # Nose -> Site (Head Top approximate)
-
-    # --- LEFT ARM (Now using ZED RIGHT indices) ---
-    # ZED Right Arm indices: 11-17
-    h36m_data[:, 16, :] = zed_data[:, 11, :]  # L Clavicle <- ZED Right Clavicle
-    h36m_data[:, 17, :] = zed_data[:, 12, :]  # L Shoulder <- ZED Right Shoulder
-    h36m_data[:, 18, :] = zed_data[:, 13, :]  # L Elbow <- ZED Right Elbow
-    h36m_data[:, 19, :] = zed_data[:, 14, :]  # L Wrist <- ZED Right Wrist
-    h36m_data[:, 20, :] = zed_data[:, 17, :]  # L Thumb <- ZED Right Thumb
-    h36m_data[:, 21, :] = zed_data[:, 15, :]  # L Hand (Palm) <- ZED Right Hand
-    h36m_data[:, 22, :] = zed_data[:, 16, :]  # L Finger <- ZED Right Finger (Tip)
-    h36m_data[:, 23, :] = zed_data[:, 16, :]  # L Tip <- ZED Right Finger (Tip)
-
-    # --- RIGHT ARM (Now using ZED LEFT indices) ---
-    # ZED Left Arm indices: 4-10
-    h36m_data[:, 24, :] = zed_data[:, 4, :]   # R Clavicle <- ZED Left Clavicle
-    h36m_data[:, 25, :] = zed_data[:, 5, :]   # R Shoulder <- ZED Left Shoulder
-    h36m_data[:, 26, :] = zed_data[:, 6, :]   # R Elbow <- ZED Left Elbow
-    h36m_data[:, 27, :] = zed_data[:, 7, :]   # R Wrist <- ZED Left Wrist
-    h36m_data[:, 28, :] = zed_data[:, 10, :]  # R Thumb <- ZED Left Thumb
-    h36m_data[:, 29, :] = zed_data[:, 8, :]   # R Hand (Palm) <- ZED Left Hand
-    h36m_data[:, 30, :] = zed_data[:, 9, :]   # R Finger <- ZED Left Finger (Tip)
-    h36m_data[:, 31, :] = zed_data[:, 9, :]   # R Tip <- ZED Left Finger (Tip)
-
-    return h36m_data
 ############################
 #Load Model
 ###########################
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/checkpoints/h36m_model_35000.pth", help='=encoder path')
+# parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/checkpoints/h36m_model_35000.pth", help='=encoder path')
 # parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/exps/zed_finetune/log/snapshot/new_world_zed_finetuned_44000.pth", help='=encoder path')
+# parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/checkpoints/fixed_world_zed_finetuned_20000.pth", help='=encoder path') #Model right before tuning arm_landing
+parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/exps/zed_finetune/log/snapshot/fixed_world_zed_finetuned_40000.pth", help='=encoder path')
 args = parser.parse_args()
 
 model = Model(config)
@@ -231,17 +155,16 @@ idct_m = torch.tensor(idct_m_np).float().cuda().unsqueeze(0)
 ####################################################################################
 #Load ZED data
 ###################################################################################
-source_number = "3"
-source_file = f"test_{source_number}"
-suffix = "original" #finetune, original, constrain
+source_number = "1"
+source_file = f"still_walk_{source_number}"
+suffix = "fix_finetune" #finetune, original, constrain
 constrain = False
-use_hand = False
 
 # source = f"/home/sosuke/thesis/siMLPe/data/zed_data/{source_file}.json"
 # source = f"/home/sosuke/thesis/siMLPe/data/jan22_extradata/{source_file}.json"
 # source = f"/home/sosuke/thesis/siMLPe/data/training_data/{source_file}.json"
-# source = f"/home/sosuke/thesis/siMLPe/data/world_data/world_data/feb22/{source_file}.json"
-source = f"/home/sosuke/thesis/siMLPe/data/{source_file}.json"
+source = f"/home/sosuke/thesis/siMLPe/data/world_data/still_cam_3_7/{source_file}.json"
+# source = f"/home/sosuke/thesis/siMLPe/data/{source_file}.json"
 if source.endswith('.json') or source.endswith('.jsonl'):
     with open(source, 'r') as file:
         data = json.load(file)
@@ -344,9 +267,15 @@ for timestamp_key, frame_data in data.items():
             root = h36m_32[:, 0:1, :] # Pelvis
             h36m_rooted = h36m_32 - root
             
+            #Store the heading PRE-flipping of Y
             zed_quats_np = np.array(heading_list) # (50, 4)
             rotations = R.from_quat(zed_quats_np)
-            inv_rot_matrices = rotations.inv().as_matrix()
+
+            #H36M Treats Facing forward as +Y whilst zed is -Y!!!
+            correction_rot = R.from_euler('y', 180, degrees=True)
+            corrected_inv_rotations = correction_rot * rotations.inv()
+
+            inv_rot_matrices = corrected_inv_rotations.as_matrix()
             h36m_derotated = np.einsum('tij,tkj->tki', inv_rot_matrices, h36m_rooted)
 
             input_centered_22 = h36m_derotated[:, joint_used_xyz, :]
@@ -356,16 +285,15 @@ for timestamp_key, frame_data in data.items():
             TOTAL_HORIZON = 60   
             PRED_STEP = 10       
             num_iterations = TOTAL_HORIZON // PRED_STEP
-            #Scale the velocity and limb movement to make extreme predictions
+            
+            #Scale the velocity and limb movement if desired
             LIMB_SCALE=1.0
             ROOT_SCALE=1.0
-            if use_hand:
-                ROOT_SCALE=0.1
             
             # Convert to Tensor (Model expects centered data)
-            extrapolator = GlobalTrajectoryExtrapolator(dt=1.0/15.0)
+            extrapolator = MEKFTrajectoryExtrapolator(dt=1.0/25.0)
 
-            # 2. Feed the filter the past 50 frames (input sequence) to build momentum
+            # 2. Feed the filter the past 50 frames (input sequence)
             for i in range(50):
                 global_pos = past_frames_zed[i,0,:] # Shape (3,)
                 global_quat = zed_quats_np[i]    # Shape (4,)
@@ -376,17 +304,13 @@ for timestamp_key, frame_data in data.items():
             input_tensor = torch.tensor(input_centered_22).float().cuda()
             input_tensor = input_tensor.reshape(1, 50, -1) 
 
-            # Root Velocity Tracking
-            #TODO Switch this out with KF for velocity
-            last_root_pos = root[-1, 0, :]   
-            prev_root_pos = root[-20, 0, :]   
-            velocity = (last_root_pos - prev_root_pos) / 20.0 
-            velocity = velocity * ROOT_SCALE
-            current_root_cursor = last_root_pos.copy()
-
             full_prediction_abs = []
             full_prediction_centered = []
             
+            #Rotations for re-mapping back to zed's world space
+            future_rotations = R.from_quat(future_global_quats)
+            correction_inv = correction_rot.inv()
+
             # 3. Auto-Regressive Loop
             with torch.no_grad():
                 for i in range(num_iterations):
@@ -423,27 +347,19 @@ for timestamp_key, frame_data in data.items():
 
                     for t in range(PRED_STEP):
                         abs_t = (i * PRED_STEP) + t
+
+                        #Apply Y-axis flip redo
+                        final_rot = future_rotations[abs_t] * correction_inv
+                        rot_matrix = final_rot.as_matrix()
                         
                         # Get the rotation matrix for this specific future frame
-                        rot_matrix = future_rotations[abs_t].as_matrix() # Shape (3, 3)
+                        # rot_matrix = future_rotations[abs_t].as_matrix() # Shape (3, 3)
                         
-                        # Re-apply rotation to all 22 joints
+                        # Re-apply KF rotation and position to all 22 joints
                         rotated_pose = (rot_matrix @ pred_numpy_centered[t].T).T 
                         final_global_poses[t] = rotated_pose + future_global_pos[abs_t]
                         
                     full_prediction_abs.append(final_global_poses)
-
-                    # # 2. Absolute Prediction (Add Root)
-                    # chunk_roots = []
-                    # for f in range(1, PRED_STEP + 1):
-                    #     new_root = current_root_cursor + (velocity * f)
-                    #     chunk_roots.append(new_root)
-                    
-                    # chunk_roots = np.array(chunk_roots)[:, np.newaxis, :] 
-                    # current_root_cursor = chunk_roots[-1, 0, :] 
-                    
-                    # pred_numpy_abs = pred_numpy_centered + chunk_roots
-                    # full_prediction_abs.append(pred_numpy_abs)
 
             # 4. Final Save
             final_pred_abs = np.concatenate(full_prediction_abs, axis=0)
@@ -479,6 +395,6 @@ np.savez(save_path,
          zero_output = np.array(zeroed_output)
          )
 
-print(f"Done! Saved {len(all_preds_saved)} samples to {source_file}.npz")
+print(f"Done! Saved {len(all_preds_saved)} samples to {save_path}_{source_file}.npz")
 
 
