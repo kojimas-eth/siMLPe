@@ -41,7 +41,13 @@ def add_path(path):
 add_path(osp.join(C.root_dir, 'lib'))
 
 """Data Dir and Weight Dir"""
-C.zed_data_dir = [ osp.join(C.root_dir, 'data/world_data/world_data/') ,osp.join(C.root_dir, 'data/world_data/world_data/test/'), osp.join(C.root_dir, 'data/world_data/training_data/') ]
+C.zed_data_dir = [ 
+    osp.join(C.root_dir, 'data/world_data/world_data/'),
+    osp.join(C.root_dir, 'data/world_data/world_data/test/'), 
+    osp.join(C.root_dir, 'data/world_data/training_data/') 
+]
+
+C.action_filter = ['walk', 'moving_walk', 'turn']
 C.motion = edict()
 
 C.motion.h36m_input_length = 50
@@ -85,14 +91,14 @@ C.motion_fc_out.activation = 'relu'
 C.motion_fc_out.init_w_trunc_normal = True
 C.motion_fc_out.temporal_fc = False
 
-C.model_pth = osp.join(C.root_dir, 'checkpoints/h36m_model_35000.pth')
+C.model_pth = osp.join(C.root_dir, 'exps/zed_finetune/log/snapshot/fixed_world_zed_finetuned_40000.pth')
 
 """Train Config"""
 C.batch_size = 256
 C.num_workers = 8
 
-C.cos_lr_max=5e-6
-C.cos_lr_min=1e-8
+C.cos_lr_max=1e-3
+C.cos_lr_min=1e-4
 C.cos_lr_total_iters=50001
 
 C.weight_decay = 1e-4

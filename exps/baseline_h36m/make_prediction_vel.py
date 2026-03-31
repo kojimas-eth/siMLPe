@@ -12,8 +12,8 @@ import json
 import time 
 
 import numpy as np
-from config  import config
-from model import siMLPe as Model
+from zed_finetune.vel_config  import config
+from zed_finetune.velocity_model import siMLPe as Model
 
 from datasets.h36m_eval import H36MEval
 
@@ -127,10 +127,7 @@ def zed34_to_h36m32(zed_data):
 #Load Model
 ###########################
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-# parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/checkpoints/h36m_model_35000.pth", help='=encoder path')
-# parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/exps/zed_finetune/log/snapshot/new_world_zed_finetuned_44000.pth", help='=encoder path')
-# parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/checkpoints/fixed_world_zed_finetuned_20000.pth", help='=encoder path') #Model right before tuning arm_landing
-parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/exps/zed_finetune/log/snapshot/fixed_world_zed_finetuned_40000.pth", help='=encoder path')
+parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/exps/zed_finetune/log/snapshot/velocity_model_44000.pth", help='=encoder path')
 args = parser.parse_args()
 
 model = Model(config)
@@ -157,11 +154,15 @@ idct_m = torch.tensor(idct_m_np).float().cuda().unsqueeze(0)
 ###################################################################################
 source_number = "10"
 source_file = f"still_walk_{source_number}"
-suffix = "fix_finetune" #finetune, original, constrain
+suffix = "vel" #finetune, original, constrain
 constrain = False
 
 extreme = True
 SCALE_FACTOR = 2.5 #how much to exaggerate input movement for extreme test
+VEL_SCALE = 2.5  # Neural Network's velocity scale
+YAW_SCALE = 2.0
+LIMB_SCALE=1.0
+
 
 # source = f"/home/sosuke/thesis/siMLPe/data/zed_data/{source_file}.json"
 # source = f"/home/sosuke/thesis/siMLPe/data/jan22_extradata/{source_file}.json"
@@ -174,27 +175,6 @@ if source.endswith('.json') or source.endswith('.jsonl'):
 
 timestamps = sorted([entry['timestamp'] for entry in data.values()])
 
-# # Calculate differences between frames
-# # Convert nanoseconds to seconds (1e9 ns = 1 s)
-# timestamps_sec = np.array(timestamps) / 1e9
-# deltas = np.diff(timestamps_sec)
-
-# # Calculate FPS stats
-# median_delta = np.median(deltas)
-# calculated_fps = 1.0 / median_delta
-
-# print(f"Total Frames: {len(timestamps)}")
-# print(f"Min Delta: {np.min(deltas) * 1000:.2f} ms")
-# print(f"Median Delta: {median_delta * 1000:.2f} ms")
-# print(f"Estimated FPS: {calculated_fps:.2f}")
-
-# if 28 < calculated_fps < 32:
-#     print("--> This is likely 30 FPS data. Usually comes from fast quality setting")
-# elif 58 < calculated_fps < 62:
-#     print("--> This is likely 60 FPS data.")
-# elif 14 < calculated_fps < 16:
-#     print("--> This is likely 15 FPS data. Usually comes from both medium quality setting.") 
-
 all_inputs_saved = []
 all_preds_saved = []
 zeroed_input=[]
@@ -202,6 +182,7 @@ zeroed_output=[]
 
 history_buffer = []
 heading_list = []
+vel_list = []
 MAX_SINGLE_JOINT_MOVE=0.3
 MAX_AVG_BODY_MOVE=0.3
 
@@ -216,6 +197,9 @@ for timestamp_key, frame_data in data.items():
         heading_quat = person.get("global_root_orientation", [0,0,0,1])
         heading_quat_array = np.array(heading_quat) #(4,)
         heading_list.append(heading_quat_array)
+
+        curr_vel = person.get("velocity", [0,0,0])
+        vel_list.append(curr_vel)
 
         if np.isnan(keypoints_array).any():
             print(f"NaN detected at timestamp {error_time}")
@@ -257,6 +241,7 @@ for timestamp_key, frame_data in data.items():
         if len(history_buffer)> 50:
             history_buffer.pop(0)
             heading_list.pop(0)
+            vel_list.pop(0)
         
         if len(history_buffer) == 50:
             
@@ -299,20 +284,24 @@ for timestamp_key, frame_data in data.items():
             PRED_STEP = 10       
             num_iterations = TOTAL_HORIZON // PRED_STEP
             
-            #Scale the velocity and limb movement if desired
-            LIMB_SCALE=1.0
-            ROOT_SCALE=1.0
-            
-            # Convert to Tensor (Model expects centered data)
-            extrapolator = MEKFTrajectoryExtrapolator(dt=1.0/25.0)
 
-            # 2. Feed the filter the past 50 frames (input sequence)
-            for i in range(50):
-                global_pos = past_frames_zed[i,0,:] # Shape (3,)
-                global_quat = zed_quats_np[i]    # Shape (4,)
-                extrapolator.update(global_pos, global_quat)
-            future_global_pos, future_global_quats = extrapolator.predict_future(num_frames=TOTAL_HORIZON)
-            future_rotations = R.from_quat(future_global_quats)
+            dt = 1.0 / 25.0 #TODO: Changed from 25
+            
+            current_global_pos = past_frames_zed[-1, 0, :].copy() 
+            
+            # Freeze the last known global rotation for the prediction horizon
+            last_global_quat = zed_quats_np[-1]
+            initial_rot = R.from_quat(last_global_quat)
+            
+            # Extract Yaw (0), Pitch (1), and Roll (2) in radians
+            initial_euler = initial_rot.as_euler('yxz', degrees=False)
+            current_yaw = initial_euler[0]
+            fixed_pitch = initial_euler[1]
+            fixed_roll = initial_euler[2]
+            
+            future_rotations = [None] * TOTAL_HORIZON 
+            future_global_pos = np.zeros((TOTAL_HORIZON, 3))
+
 
             input_tensor = torch.tensor(input_centered_22).float().cuda()
             input_tensor = input_tensor.reshape(1, 50, -1) 
@@ -320,35 +309,60 @@ for timestamp_key, frame_data in data.items():
             full_prediction_abs = []
             full_prediction_centered = []
             
-            #Rotations for re-mapping back to zed's world space
-            future_rotations = R.from_quat(future_global_quats)
             correction_inv = correction_rot.inv()
 
-            # 3. Auto-Regressive Loop
+            # 2. Auto-Regressive Loop
             with torch.no_grad():
                 for i in range(num_iterations):
-                    # DCT & Model
+                    # DCT
                     if config.deriv_input:
                         input_dct = torch.matmul(dct_m[:, :, :config.motion.h36m_input_length], input_tensor)
                     else:
                         input_dct = input_tensor.clone()
+
+                    pred_dct, pred_vel_dct, pred_yaw_dct = model(input_dct)
                     
-                    pred_dct = model(input_dct)
                     pred_std = torch.matmul(idct_m[:, :config.motion.h36m_input_length, :], pred_dct) 
-                    
-                    # Take first 10 chunk of pred
                     pred_std = pred_std[:, :PRED_STEP, :] 
 
-                    # Residual
                     if config.deriv_output:
                         pred_std = pred_std * LIMB_SCALE
                         pred_std = pred_std + input_tensor[:, -1:, :].repeat(1, PRED_STEP, 1)
 
-                    # Update Buffer
+                    # Update Buffer with Pose
                     input_tensor = torch.cat([input_tensor[:, PRED_STEP:, :], pred_std], dim=1)
 
-                    # --- Post-Process ---
-                    # 1. Centered Prediction
+                    #Vel IDCT
+                    pred_vel_std = torch.matmul(idct_m[:, :config.motion.h36m_input_length, :], pred_vel_dct)
+                    pred_vel_std = pred_vel_std[:, :PRED_STEP, :] # Shape (1, 10, 2)
+                    vel_numpy = pred_vel_std[0].cpu().numpy() # Shape (10, 2)
+                    
+                    # Yaw Rate IDCT
+                    pred_yaw_std = torch.matmul(idct_m[:, :config.motion.h36m_input_length, :], pred_yaw_dct)
+                    pred_yaw_std = pred_yaw_std[:, :PRED_STEP, :] 
+                    yaw_numpy = pred_yaw_std[0].cpu().numpy() # Shape (10, 1)
+
+                    for t in range(PRED_STEP):
+                        abs_t = (i * PRED_STEP) + t
+                        
+                        # Position Integration 
+                        real_vel_x = -vel_numpy[t, 0] * VEL_SCALE
+                        real_vel_z = -vel_numpy[t, 1] * VEL_SCALE
+                        
+                        current_global_pos[0] += real_vel_x * dt
+                        current_global_pos[2] += real_vel_z * dt
+                        future_global_pos[abs_t] = current_global_pos.copy()
+
+                        #Yaw Integration (Apply YAW_SCALE)
+                        boosted_yaw_rate = yaw_numpy[t, 0] * YAW_SCALE
+                        current_yaw += boosted_yaw_rate * dt
+                        
+                        # Rebuild the rotation
+                        new_euler = [current_yaw, fixed_pitch, fixed_roll]
+                        new_rot = R.from_euler('yxz', new_euler, degrees=False)
+                        future_rotations[abs_t] = new_rot
+
+                    # --- Post-Process Pose to Global Space ---
                     pred_numpy_centered = pred_std.cpu().numpy().reshape(PRED_STEP, 22, 3)
                     
                     if constrain:
@@ -360,15 +374,8 @@ for timestamp_key, frame_data in data.items():
 
                     for t in range(PRED_STEP):
                         abs_t = (i * PRED_STEP) + t
-
-                        #Apply Y-axis flip redo
                         final_rot = future_rotations[abs_t] * correction_inv
                         rot_matrix = final_rot.as_matrix()
-                        
-                        # Get the rotation matrix for this specific future frame
-                        # rot_matrix = future_rotations[abs_t].as_matrix() # Shape (3, 3)
-                        
-                        # Re-apply KF rotation and position to all 22 joints
                         rotated_pose = (rot_matrix @ pred_numpy_centered[t].T).T 
                         final_global_poses[t] = rotated_pose + future_global_pos[abs_t]
                         
@@ -394,7 +401,7 @@ print("Saving results to disk...")
 all_inputs_saved = np.array(all_inputs_saved) # Shape (N, 50, 22, 3)
 all_preds_saved = np.array(all_preds_saved)   # Shape (N, 25, 22, 3)
 
-folder_name = f"predictions_fix/{suffix}"
+folder_name = f"vel_model/{suffix}"
 # Create directory
 os.makedirs(folder_name, exist_ok=True)
 
