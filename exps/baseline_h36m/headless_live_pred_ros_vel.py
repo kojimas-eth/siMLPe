@@ -215,6 +215,7 @@ def main(opt):
     bodies = sl.Bodies()
 
     history_buffer = []
+    h36m_buffer=[]
     heading_list = []
 
     # --- Hyperparameters ---
@@ -224,6 +225,10 @@ def main(opt):
     VEL_SCALE = 1.0
     YAW_SCALE = 1.0
     LIMB_SCALE = 1.0
+    
+    #Prevent body from jumping all of a sudden
+    MAX_JUMP_DIST = 0.5
+
     dt = 1.0 / 25.0
 
     try:
@@ -236,27 +241,37 @@ def main(opt):
                     keypoints_array = np.array(skeleton_3d)  
                     heading_quat = body.global_root_orientation
                     heading_quat_array = np.array(heading_quat) 
+
+                    single_frame_zed = np.array([keypoints_array])
+                    single_frame_h36m = zed34_to_h36m32(single_frame_zed)[0]
+
+                    ##Freeze input if we detect large jump
+                    # if len(history_buffer) > 0:
+                    #     prev_root = history_buffer[-1][0]
+                    #     curr_root = keypoints_array[0]
+                    #     jump_dist = np.linalg.norm(curr_root[:3] - prev_root[:3])
+                        
+                    #     if jump_dist > MAX_JUMP_DIST:
+                    #         rospy.logwarn(f"Tracking glitch! Body jumped {jump_dist:.2f}m in one frame. Freezing input.")
+                    #         keypoints_array = history_buffer[-1].copy()
+                    #         heading_quat_array = heading_list[-1].copy()
+                    #         single_frame_h36m = h36m_buffer[-1].copy()
+
                     
                     heading_list.append(heading_quat_array)
                     history_buffer.append(keypoints_array)
+                    h36m_buffer.append(single_frame_h36m)
                             
                     if len(history_buffer) > 50:
                         history_buffer.pop(0)
                         heading_list.pop(0)
+                        h36m_buffer.pop(0)
                     
                     if len(history_buffer) == 50:
                         past_frames_zed = np.array(history_buffer) 
                         
-                        if extreme:
-                            root_idx = 0 
-                            start_xy = past_frames_zed[0:1, root_idx, :2]
-                            current_xy = past_frames_zed[:, root_idx, :2]
-                            movement_delta = current_xy - start_xy
-                            
-                            extra_travel = movement_delta * (SCALE_FACTOR - 1.0)
-                            past_frames_zed[:, :, :2] += extra_travel[:, np.newaxis, :]
 
-                        h36m_32 = zed34_to_h36m32(past_frames_zed) 
+                        h36m_32 = np.array(h36m_buffer)
                         input_absolute_22 = h36m_32[:, joint_used_xyz, :]
 
                         root = h36m_32[:, 0:1, :] 
@@ -273,7 +288,7 @@ def main(opt):
 
                         input_centered_22 = h36m_derotated[:, joint_used_xyz, :]
 
-                        TOTAL_HORIZON = 30   
+                        TOTAL_HORIZON = 20   
                         PRED_STEP = 10       
                         num_iterations = TOTAL_HORIZON // PRED_STEP
                         
@@ -296,6 +311,8 @@ def main(opt):
                         full_prediction_abs = []
                         correction_inv = correction_rot.inv()
 
+                        inference_t = 0
+
                         with torch.no_grad():
                             for i in range(num_iterations):
                                 if config.deriv_input:
@@ -303,8 +320,11 @@ def main(opt):
                                 else:
                                     input_dct = input_tensor.clone()
                                 
+                                start_t = time.time()
                                 pred_dct, pred_vel_dct, pred_yaw_dct = model(input_dct)
-                                
+                                end_t = time.time()
+                                inference_t += end_t - start_t
+
                                 pred_std = torch.matmul(idct_m[:, :config.motion.h36m_input_length, :], pred_dct) 
                                 pred_std = pred_std[:, :PRED_STEP, :] 
 
@@ -355,10 +375,12 @@ def main(opt):
                                     
                                 full_prediction_abs.append(final_global_poses)
 
+                            print(f"inference frequency: {1 / inference_t}")
+                            inference_t = 0
+
                         final_pred_abs = np.concatenate(full_prediction_abs, axis=0)
 
-                        # --- ROS INTEGRATION: Broadcast the live data! ---
-                        ros_publisher.publish(input_absolute_22, final_pred_abs)
+                        ros_publisher.publish(input_absolute_22[-1:], final_pred_abs)
 
     except KeyboardInterrupt:
         print("\nProcess interrupted by user. Cleaning up...")
