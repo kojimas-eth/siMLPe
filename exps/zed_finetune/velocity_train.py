@@ -121,11 +121,11 @@ def train_step(h36m_motion_input, h36m_motion_target, velocity_target, yaw_targe
 
     return loss_total.item(), optimizer, current_lr
 
-# 1. Initialize Model
+
 model = Model(config)
 model.cuda()
 
-# 2. Load Pretrained Weights
+# Load Pretrained Weights
 if config.model_pth is not None:
     print(f"Loading pretrained model from {config.model_pth}")
     state_dict = torch.load(config.model_pth, weights_only=True, map_location="cpu")
@@ -155,7 +155,7 @@ for name, param in model.named_parameters():
     if 'velocity' not in name and 'rotation' not in name:
         param.requires_grad = False # Freeze everything else!
 
-# 3. Setup ZED Dataset
+# Setup ZED Dataset
 dataset = ZEDDataset(config, 'train', data_aug=True)
 dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True, drop_last=True)
 
@@ -168,7 +168,8 @@ eval_dataloader = DataLoader(eval_dataset, batch_size=config.batch_size, shuffle
 optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), 
                              lr=config.cos_lr_max, 
                              weight_decay=config.weight_decay)
-# 5. Training Loop
+
+#Training Loop
 model.train()
 nb_iter = 0
 

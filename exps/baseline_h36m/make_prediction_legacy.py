@@ -1,6 +1,11 @@
 import argparse
 import os, sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+
 from scipy.spatial.transform import Rotation as R
+from zed_finetune.simple_prediction import constrain_prediction, SKELETON_EDGES_22
+from  utils.kalman_filter import GlobalTrajectoryExtrapolator
 import torch
 import json
 import time 
@@ -200,7 +205,9 @@ def zed34_to_h36m32_flip(zed_data):
 #Load Model
 ###########################
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/checkpoints/h36m_model_35000.pth", help='=encoder path')
+# parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/checkpoints/h36m_model_35000.pth", help='=encoder path')
+# parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/exps/zed_finetune/log/snapshot/new_world_zed_finetuned_44000.pth", help='=encoder path') 
+parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/exps/zed_finetune/log/snapshot/fixed_world_zed_finetuned_22000.pth", help='=encoder path')
 args = parser.parse_args()
 
 model = Model(config)
@@ -222,41 +229,46 @@ dct_m_np, idct_m_np = get_dct_matrix(config.motion.h36m_input_length_dct) # usua
 dct_m = torch.tensor(dct_m_np).float().cuda().unsqueeze(0)
 idct_m = torch.tensor(idct_m_np).float().cuda().unsqueeze(0)
 
-############################
+####################################################################################
 #Load ZED data
-###########################
-source_number = 5
-source_file = f"34m_walk_{source_number}"
+###################################################################################
+source_number = "1"
+source_file = f"test_{source_number}"
+suffix = "fix_finetune" #finetune, original, constrain
+constrain = False
+use_hand = False
+
 # source = f"/home/sosuke/thesis/siMLPe/data/zed_data/{source_file}.json"
-source = f"/home/sosuke/thesis/siMLPe/data/jan16/{source_file}.json"
+# source = f"/home/sosuke/thesis/siMLPe/data/jan22_extradata/{source_file}.json"
+# source = f"/home/sosuke/thesis/siMLPe/data/training_data/{source_file}.json"
+# source = f"/home/sosuke/thesis/siMLPe/data/world_data/world_data/feb22/{source_file}.json"
+source = f"/home/sosuke/thesis/siMLPe/data/{source_file}.json"
 if source.endswith('.json') or source.endswith('.jsonl'):
     with open(source, 'r') as file:
         data = json.load(file)
 
 timestamps = sorted([entry['timestamp'] for entry in data.values()])
 
-# 2. Calculate differences between frames
-# Convert nanoseconds to seconds (1e9 ns = 1 s)
-timestamps_sec = np.array(timestamps) / 1e9
-deltas = np.diff(timestamps_sec)
+# # Calculate differences between frames
+# # Convert nanoseconds to seconds (1e9 ns = 1 s)
+# timestamps_sec = np.array(timestamps) / 1e9
+# deltas = np.diff(timestamps_sec)
 
-# 3. Calculate FPS stats
-# We use MEDIAN because it is robust against dropped frames/gaps
-median_delta = np.median(deltas)
-calculated_fps = 1.0 / median_delta
+# # Calculate FPS stats
+# median_delta = np.median(deltas)
+# calculated_fps = 1.0 / median_delta
 
-print(f"Total Frames: {len(timestamps)}")
-print(f"Min Delta: {np.min(deltas) * 1000:.2f} ms")
-print(f"Median Delta: {median_delta * 1000:.2f} ms")
-print(f"Estimated FPS: {calculated_fps:.2f}")
+# print(f"Total Frames: {len(timestamps)}")
+# print(f"Min Delta: {np.min(deltas) * 1000:.2f} ms")
+# print(f"Median Delta: {median_delta * 1000:.2f} ms")
+# print(f"Estimated FPS: {calculated_fps:.2f}")
 
-# Heuristic check
-if 28 < calculated_fps < 32:
-    print("--> This is likely 30 FPS data. Usually comes from fast quality setting")
-elif 58 < calculated_fps < 62:
-    print("--> This is likely 60 FPS data.")
-elif 14 < calculated_fps < 16:
-    print("--> This is likely 15 FPS data. Usually comes from both medium quality setting.") 
+# if 28 < calculated_fps < 32:
+#     print("--> This is likely 30 FPS data. Usually comes from fast quality setting")
+# elif 58 < calculated_fps < 62:
+#     print("--> This is likely 60 FPS data.")
+# elif 14 < calculated_fps < 16:
+#     print("--> This is likely 15 FPS data. Usually comes from both medium quality setting.") 
 
 all_inputs_saved = []
 all_preds_saved = []
@@ -264,6 +276,7 @@ zeroed_input=[]
 zeroed_output=[]
 
 history_buffer = []
+heading_list = []
 MAX_SINGLE_JOINT_MOVE=0.3
 MAX_AVG_BODY_MOVE=0.3
 
@@ -275,6 +288,9 @@ for timestamp_key, frame_data in data.items():
         glitch = False
         keypoints=person.get("keypoint", [])
         keypoints_array = np.array(keypoints) #(34,3)
+        heading_quat = person.get("global_root_orientation", [0,0,0,1])
+        heading_quat_array = np.array(heading_quat) #(4,)
+        heading_list.append(heading_quat_array)
 
         if np.isnan(keypoints_array).any():
             print(f"NaN detected at timestamp {error_time}")
@@ -312,52 +328,57 @@ for timestamp_key, frame_data in data.items():
         else:
             history_buffer.append(prev_frame)          
 
-        
         if len(history_buffer)> 50:
             history_buffer.pop(0)
+            heading_list.pop(0)
         
         if len(history_buffer) == 50:
             
-            # 1. Prepare Data
             past_frames_zed = np.array(history_buffer) # (50, 34, 3)
-            
             # Map ZED(34) -> H36M(32)
             h36m_32 = zed34_to_h36m32(past_frames_zed) # (50, 32, 3)
-
-            # A. Prepare Absolute Input (For 'all_inputs_saved')
             input_absolute_22 = h36m_32[:, joint_used_xyz, :]
             all_inputs_saved.append(input_absolute_22)
 
-            # B. Prepare Centered Input (For 'zeroed_input' & Model)
+            # Prepare Centered Input (For 'zeroed_input' & Model)
             root = h36m_32[:, 0:1, :] # Pelvis
             h36m_rooted = h36m_32 - root
-            input_centered_22 = h36m_rooted[:, joint_used_xyz, :] # (50, 22, 3)
+            
+            zed_quats_np = np.array(heading_list) # (50, 4)
+            rotations = R.from_quat(zed_quats_np)
+            inv_rot_matrices = rotations.inv().as_matrix()
+            h36m_derotated = np.einsum('tij,tkj->tki', inv_rot_matrices, h36m_rooted)
+
+            input_centered_22 = h36m_derotated[:, joint_used_xyz, :]
             zeroed_input.append(input_centered_22)
 
-            # 2. Setup Auto-Regressive Variables
+            # Setup Auto-Regressive Variables
             TOTAL_HORIZON = 60   
             PRED_STEP = 10       
             num_iterations = TOTAL_HORIZON // PRED_STEP
             #Scale the velocity and limb movement to make extreme predictions
-            LIMB_SCALE=2.0
-            ROOT_SCALE=1.1
-            
+            LIMB_SCALE=1.0
+            ROOT_SCALE=1.0
+            if use_hand:
+                ROOT_SCALE=0.1
             
             # Convert to Tensor (Model expects centered data)
+            extrapolator = GlobalTrajectoryExtrapolator(dt=1.0/15.0)
+
+            # 2. Feed the filter the past 50 frames (input sequence) to build momentum
+            for i in range(50):
+                global_pos = past_frames_zed[i,0,:] # Shape (3,)
+                global_quat = zed_quats_np[i]    # Shape (4,)
+                extrapolator.update(global_pos, global_quat)
+            future_global_pos, future_global_quats = extrapolator.predict_future(num_frames=TOTAL_HORIZON)
+            future_rotations = R.from_quat(future_global_quats)
+
             input_tensor = torch.tensor(input_centered_22).float().cuda()
             input_tensor = input_tensor.reshape(1, 50, -1) 
 
-            # Root Velocity Tracking
-            last_root_pos = root[-1, 0, :]   
-            prev_root_pos = root[-20, 0, :]   
-            velocity = (last_root_pos - prev_root_pos) / 20.0 
-            velocity = velocity * ROOT_SCALE
-            current_root_cursor = last_root_pos.copy()
-
             full_prediction_abs = []
             full_prediction_centered = []
-
-
+            
             # 3. Auto-Regressive Loop
             with torch.no_grad():
                 for i in range(num_iterations):
@@ -370,7 +391,7 @@ for timestamp_key, frame_data in data.items():
                     pred_dct = model(input_dct)
                     pred_std = torch.matmul(idct_m[:, :config.motion.h36m_input_length, :], pred_dct) 
                     
-                    # Take chunk
+                    # Take first 10 chunk of pred
                     pred_std = pred_std[:, :PRED_STEP, :] 
 
                     # Residual
@@ -384,19 +405,26 @@ for timestamp_key, frame_data in data.items():
                     # --- Post-Process ---
                     # 1. Centered Prediction
                     pred_numpy_centered = pred_std.cpu().numpy().reshape(PRED_STEP, 22, 3)
+                    
+                    if constrain:
+                        pred_numpy_centered = constrain_prediction(input_absolute_22[-1], pred_numpy_centered)
+
                     full_prediction_centered.append(pred_numpy_centered)
                     
-                    # 2. Absolute Prediction (Add Root)
-                    chunk_roots = []
-                    for f in range(1, PRED_STEP + 1):
-                        new_root = current_root_cursor + (velocity * f)
-                        chunk_roots.append(new_root)
-                    
-                    chunk_roots = np.array(chunk_roots)[:, np.newaxis, :] 
-                    current_root_cursor = chunk_roots[-1, 0, :] 
-                    
-                    pred_numpy_abs = pred_numpy_centered + chunk_roots
-                    full_prediction_abs.append(pred_numpy_abs)
+                    final_global_poses = np.zeros_like(pred_numpy_centered)
+
+                    for t in range(PRED_STEP):
+                        abs_t = (i * PRED_STEP) + t
+                        
+                        # Get the rotation matrix for this specific future frame
+                        rot_matrix = future_rotations[abs_t].as_matrix() # Shape (3, 3)
+                        
+                        # Re-apply rotation and position to all 22 joints
+                        rotated_pose = (rot_matrix @ pred_numpy_centered[t].T).T 
+                        final_global_poses[t] = rotated_pose + future_global_pos[abs_t]
+                        
+                    full_prediction_abs.append(final_global_poses)
+
 
             # 4. Final Save
             final_pred_abs = np.concatenate(full_prediction_abs, axis=0)
@@ -418,12 +446,12 @@ print("Saving results to disk...")
 all_inputs_saved = np.array(all_inputs_saved) # Shape (N, 50, 22, 3)
 all_preds_saved = np.array(all_preds_saved)   # Shape (N, 25, 22, 3)
 
-folder_name = "predictions"
+folder_name = f"predictions_fix/{suffix}"
 # Create directory
 os.makedirs(folder_name, exist_ok=True)
 
 # Join path safely
-save_path = os.path.join(folder_name, f"{source_file}.npz")
+save_path = os.path.join(folder_name, f"{source_file}_{suffix}.npz")
 
 np.savez(save_path, 
          inputs=all_inputs_saved, 
@@ -432,19 +460,6 @@ np.savez(save_path,
          zero_output = np.array(zeroed_output)
          )
 
-print(f"Done! Saved {len(all_preds_saved)} samples to zed_inference_results.{source_file}.npz")
+print(f"Done! Saved {len(all_preds_saved)} samples to {source_file}.npz")
 
-
-
-'''
-Do the following things:
-
-collect enough inputs (50 in our case) to make a prediction
-Remap the joints coming from zed to h36m format
-During inference only use the 22 joints 
-Apply zeroing of positions to all 50 frames
-feed into the model and get prediction
-
-Save the inputs and predictions as .npy files for later evaluation
-'''
 

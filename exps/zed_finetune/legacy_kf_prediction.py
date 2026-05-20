@@ -272,12 +272,13 @@ if __name__ == "__main__":
     ###########################
     #Load ZED data
     ###########################
-    source_number = 2
-    source_file = f"walk_{source_number}"
+    source_number = 3
+    source_file = f"test_{source_number}"
     suffix = "KF"
     constrain = False
     # source = f"/home/sosuke/thesis/siMLPe/data/zed_data/{source_file}.json"
-    source = f"/home/sosuke/thesis/siMLPe/data/world_data/world_data/{source_file}.json"
+    # source = f"/home/sosuke/thesis/siMLPe/data/world_data/world_data/{source_file}.json"
+    source = f"/home/sosuke/thesis/siMLPe/data/{source_file}.json"
 
     if source.endswith('.json') or source.endswith('.jsonl'):
         with open(source, 'r') as file:
@@ -371,7 +372,7 @@ if __name__ == "__main__":
                 if constrain:
                     predicted_frames = constrain_prediction(last_frame, predicted_frames)
 
-                predicted_frames_centered = predicted_frames - root[-1, :]
+                predicted_frames_centered = predicted_frames - predicted_frames[:,0:1,:]
                 all_preds_saved.append(predicted_frames)
                 zeroed_output.append(predicted_frames_centered)
 
@@ -394,7 +395,7 @@ if __name__ == "__main__":
     os.makedirs(folder_name, exist_ok=True)
 
     # Join path safely
-    save_path = os.path.join(folder_name, f"{source_file}_interp_{suffix}.npz")
+    save_path = os.path.join(folder_name, f"{source_file}_{suffix}.npz")
 
     np.savez(save_path, 
             inputs=all_inputs_saved, 
