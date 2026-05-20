@@ -5,7 +5,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from scipy.spatial.transform import Rotation as R
 from zed_finetune.simple_prediction import constrain_prediction, SKELETON_EDGES_22
-from  utils.kalman_filter import GlobalTrajectoryExtrapolator
+from  utils.kalman_filter import KFTrajectoryExtrapolator
 from  utils.extended_KF import MEKFTrajectoryExtrapolator
 import torch
 import json
@@ -128,9 +128,8 @@ def zed34_to_h36m32(zed_data):
 ###########################
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 # parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/checkpoints/h36m_model_35000.pth", help='=encoder path')
-# parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/exps/zed_finetune/log/snapshot/new_world_zed_finetuned_44000.pth", help='=encoder path')
-# parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/checkpoints/fixed_world_zed_finetuned_20000.pth", help='=encoder path') #Model right before tuning arm_landing
-parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/exps/zed_finetune/log/snapshot/fixed_world_zed_finetuned_40000.pth", help='=encoder path')
+parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/checkpoints/fixed_world_zed_finetuned_20000.pth", help='=encoder path') #Model right before tuning arm_landing
+
 args = parser.parse_args()
 
 model = Model(config)
@@ -163,8 +162,6 @@ constrain = False
 extreme = True
 SCALE_FACTOR = 2.5 #how much to exaggerate input movement for extreme test
 
-# source = f"/home/sosuke/thesis/siMLPe/data/zed_data/{source_file}.json"
-# source = f"/home/sosuke/thesis/siMLPe/data/jan22_extradata/{source_file}.json"
 # source = f"/home/sosuke/thesis/siMLPe/data/training_data/{source_file}.json"
 source = f"/home/sosuke/thesis/siMLPe/data/world_data/still_cam_3_7/{source_file}.json"
 # source = f"/home/sosuke/thesis/siMLPe/data/{source_file}.json"
@@ -174,27 +171,6 @@ if source.endswith('.json') or source.endswith('.jsonl'):
 
 timestamps = sorted([entry['timestamp'] for entry in data.values()])
 
-# # Calculate differences between frames
-# # Convert nanoseconds to seconds (1e9 ns = 1 s)
-# timestamps_sec = np.array(timestamps) / 1e9
-# deltas = np.diff(timestamps_sec)
-
-# # Calculate FPS stats
-# median_delta = np.median(deltas)
-# calculated_fps = 1.0 / median_delta
-
-# print(f"Total Frames: {len(timestamps)}")
-# print(f"Min Delta: {np.min(deltas) * 1000:.2f} ms")
-# print(f"Median Delta: {median_delta * 1000:.2f} ms")
-# print(f"Estimated FPS: {calculated_fps:.2f}")
-
-# if 28 < calculated_fps < 32:
-#     print("--> This is likely 30 FPS data. Usually comes from fast quality setting")
-# elif 58 < calculated_fps < 62:
-#     print("--> This is likely 60 FPS data.")
-# elif 14 < calculated_fps < 16:
-#     print("--> This is likely 15 FPS data. Usually comes from both medium quality setting.") 
-
 all_inputs_saved = []
 all_preds_saved = []
 zeroed_input=[]
@@ -202,8 +178,10 @@ zeroed_output=[]
 
 history_buffer = []
 heading_list = []
-MAX_SINGLE_JOINT_MOVE=0.3
-MAX_AVG_BODY_MOVE=0.3
+MAX_SINGLE_JOINT_MOVE=0.5
+MAX_AVG_BODY_MOVE=0.5
+
+extrapolator = KFTrajectoryExtrapolator(dt=1.0/25.0)
 
 error_time = 0
 for timestamp_key, frame_data in data.items():
@@ -220,7 +198,6 @@ for timestamp_key, frame_data in data.items():
         if np.isnan(keypoints_array).any():
             print(f"NaN detected at timestamp {error_time}")
 
-        # --- A. ZERO-JOINTS CHECK ---
         zero_joints = np.all(keypoints_array == 0, axis=1) 
         if zero_joints.any():
             # Get the indices of the bad joints
@@ -229,13 +206,8 @@ for timestamp_key, frame_data in data.items():
 
 
         if len(history_buffer) > 0:
-            #--- B. Checking motion of joints, copy previous frame if too fast ---
             prev_frame = history_buffer[-1] 
-            
-            # Calculate Euclidean distance for each joint
             distances = np.linalg.norm(keypoints_array - prev_frame, axis=1)
-            
-            # A. Check for single joint exploding
             max_dist = np.max(distances)
             if max_dist > MAX_SINGLE_JOINT_MOVE:
                 print(f"⚠️ Fast motion detected at {error_time}!")
@@ -251,6 +223,7 @@ for timestamp_key, frame_data in data.items():
         if not glitch:
             history_buffer.append(keypoints_array)
         else:
+            #Did not work as intended - leaving for legacy reference
             history_buffer.append(prev_frame)          
 
         
@@ -267,8 +240,6 @@ for timestamp_key, frame_data in data.items():
                 start_xy = past_frames_zed[0:1, root_idx, :2]
                 current_xy = past_frames_zed[:, root_idx, :2]
                 movement_delta = current_xy - start_xy
-                
-                # 2. Calculate the extra travel needed and broadcast to all 34 joints
                 extra_travel = movement_delta * (SCALE_FACTOR - 1.0)
                 past_frames_zed[:, :, :2] += extra_travel[:, np.newaxis, :]
 
@@ -302,8 +273,6 @@ for timestamp_key, frame_data in data.items():
             #Scale the velocity and limb movement if desired
             LIMB_SCALE=1.0
             ROOT_SCALE=1.0
-            
-            # Convert to Tensor (Model expects centered data)
             extrapolator = MEKFTrajectoryExtrapolator(dt=1.0/25.0)
 
             # 2. Feed the filter the past 50 frames (input sequence)
@@ -327,28 +296,25 @@ for timestamp_key, frame_data in data.items():
             # 3. Auto-Regressive Loop
             with torch.no_grad():
                 for i in range(num_iterations):
-                    # DCT & Model
                     if config.deriv_input:
                         input_dct = torch.matmul(dct_m[:, :, :config.motion.h36m_input_length], input_tensor)
                     else:
                         input_dct = input_tensor.clone()
                     
+                    # Make Prediction
                     pred_dct = model(input_dct)
                     pred_std = torch.matmul(idct_m[:, :config.motion.h36m_input_length, :], pred_dct) 
                     
                     # Take first 10 chunk of pred
                     pred_std = pred_std[:, :PRED_STEP, :] 
 
-                    # Residual
+                    # Adding Predicted Residual Error to last known frame
                     if config.deriv_output:
                         pred_std = pred_std * LIMB_SCALE
                         pred_std = pred_std + input_tensor[:, -1:, :].repeat(1, PRED_STEP, 1)
 
                     # Update Buffer
                     input_tensor = torch.cat([input_tensor[:, PRED_STEP:, :], pred_std], dim=1)
-
-                    # --- Post-Process ---
-                    # 1. Centered Prediction
                     pred_numpy_centered = pred_std.cpu().numpy().reshape(PRED_STEP, 22, 3)
                     
                     if constrain:
@@ -361,13 +327,9 @@ for timestamp_key, frame_data in data.items():
                     for t in range(PRED_STEP):
                         abs_t = (i * PRED_STEP) + t
 
-                        #Apply Y-axis flip redo
                         final_rot = future_rotations[abs_t] * correction_inv
                         rot_matrix = final_rot.as_matrix()
-                        
-                        # Get the rotation matrix for this specific future frame
-                        # rot_matrix = future_rotations[abs_t].as_matrix() # Shape (3, 3)
-                        
+
                         # Re-apply KF rotation and position to all 22 joints
                         rotated_pose = (rot_matrix @ pred_numpy_centered[t].T).T 
                         final_global_poses[t] = rotated_pose + future_global_pos[abs_t]
@@ -381,7 +343,6 @@ for timestamp_key, frame_data in data.items():
             all_preds_saved.append(final_pred_abs)
             zeroed_output.append(final_pred_centered)
 
-                # time.sleep(2)
             if len(all_preds_saved) % 50 == 0:
                 print(f"Predicted {len(all_preds_saved)} windows so far...")
 
@@ -397,8 +358,6 @@ all_preds_saved = np.array(all_preds_saved)   # Shape (N, 25, 22, 3)
 folder_name = f"predictions_fix/{suffix}"
 # Create directory
 os.makedirs(folder_name, exist_ok=True)
-
-# Join path safely
 
 if extreme:
     suffix += f"_scale{SCALE_FACTOR}"

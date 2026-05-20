@@ -1,8 +1,15 @@
 import copy
-
+import sys
+import os.path as osp
+dir_path = osp.dirname(osp.abspath(__file__))
+root_path = osp.abspath(osp.join(dir_path, '../../'))
+if root_path not in sys.path:
+    sys.path.append(root_path)
+    
 import torch
 from torch import nn
-from mlp import build_mlps
+from exps.baseline_h36m.mlp import build_mlps
+# from mlp import build_mlps
 from einops.layers.torch import Rearrange
 
 class siMLPe(nn.Module):

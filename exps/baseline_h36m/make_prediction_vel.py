@@ -5,8 +5,6 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from scipy.spatial.transform import Rotation as R
 from zed_finetune.simple_prediction import constrain_prediction, SKELETON_EDGES_22
-from  utils.kalman_filter import GlobalTrajectoryExtrapolator
-from  utils.extended_KF import MEKFTrajectoryExtrapolator
 import torch
 import json
 import time 
@@ -127,7 +125,7 @@ def zed34_to_h36m32(zed_data):
 #Load Model
 ###########################
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/exps/zed_finetune/log/snapshot/velocity_model_44000.pth", help='=encoder path')
+parser.add_argument('--model-pth', type=str, default="/home/sosuke/thesis/siMLPe/checkpoints/velocity_model_44000.pth", help='=encoder path')
 args = parser.parse_args()
 
 model = Model(config)
@@ -152,23 +150,21 @@ idct_m = torch.tensor(idct_m_np).float().cuda().unsqueeze(0)
 ####################################################################################
 #Load ZED data
 ###################################################################################
-source_number = "10"
+source_number = "3"
 source_file = f"still_walk_{source_number}"
 suffix = "vel" #finetune, original, constrain
 constrain = False
 
 extreme = True
-SCALE_FACTOR = 2.5 #how much to exaggerate input movement for extreme test
+SCALE_FACTOR = 25 #how much to exaggerate input movement for extreme test
 VEL_SCALE = 2.5  # Neural Network's velocity scale
 YAW_SCALE = 2.0
 LIMB_SCALE=1.0
 
 
-# source = f"/home/sosuke/thesis/siMLPe/data/zed_data/{source_file}.json"
-# source = f"/home/sosuke/thesis/siMLPe/data/jan22_extradata/{source_file}.json"
-# source = f"/home/sosuke/thesis/siMLPe/data/training_data/{source_file}.json"
+#load .json file
 source = f"/home/sosuke/thesis/siMLPe/data/world_data/still_cam_3_7/{source_file}.json"
-# source = f"/home/sosuke/thesis/siMLPe/data/{source_file}.json"
+
 if source.endswith('.json') or source.endswith('.jsonl'):
     with open(source, 'r') as file:
         data = json.load(file)
@@ -215,11 +211,8 @@ for timestamp_key, frame_data in data.items():
         if len(history_buffer) > 0:
             #--- B. Checking motion of joints, copy previous frame if too fast ---
             prev_frame = history_buffer[-1] 
-            
-            # Calculate Euclidean distance for each joint
             distances = np.linalg.norm(keypoints_array - prev_frame, axis=1)
-            
-            # A. Check for single joint exploding
+
             max_dist = np.max(distances)
             if max_dist > MAX_SINGLE_JOINT_MOVE:
                 print(f"⚠️ Fast motion detected at {error_time}!")
@@ -283,9 +276,7 @@ for timestamp_key, frame_data in data.items():
             TOTAL_HORIZON = 60   
             PRED_STEP = 10       
             num_iterations = TOTAL_HORIZON // PRED_STEP
-            
-
-            dt = 1.0 / 25.0 #TODO: Changed from 25
+            dt = 1.0 / 25.0 
             
             current_global_pos = past_frames_zed[-1, 0, :].copy() 
             
@@ -299,6 +290,7 @@ for timestamp_key, frame_data in data.items():
             fixed_pitch = initial_euler[1]
             fixed_roll = initial_euler[2]
             
+            #initialize future rot and pos
             future_rotations = [None] * TOTAL_HORIZON 
             future_global_pos = np.zeros((TOTAL_HORIZON, 3))
 
@@ -311,7 +303,7 @@ for timestamp_key, frame_data in data.items():
             
             correction_inv = correction_rot.inv()
 
-            # 2. Auto-Regressive Loop
+            # Auto-Regressive Loop
             with torch.no_grad():
                 for i in range(num_iterations):
                     # DCT
@@ -320,6 +312,7 @@ for timestamp_key, frame_data in data.items():
                     else:
                         input_dct = input_tensor.clone()
 
+                    #making Prediction
                     pred_dct, pred_vel_dct, pred_yaw_dct = model(input_dct)
                     
                     pred_std = torch.matmul(idct_m[:, :config.motion.h36m_input_length, :], pred_dct) 
@@ -329,7 +322,7 @@ for timestamp_key, frame_data in data.items():
                         pred_std = pred_std * LIMB_SCALE
                         pred_std = pred_std + input_tensor[:, -1:, :].repeat(1, PRED_STEP, 1)
 
-                    # Update Buffer with Pose
+                    # Update input tensor
                     input_tensor = torch.cat([input_tensor[:, PRED_STEP:, :], pred_std], dim=1)
 
                     #Vel IDCT
@@ -381,14 +374,13 @@ for timestamp_key, frame_data in data.items():
                         
                     full_prediction_abs.append(final_global_poses)
 
-            # 4. Final Save
+            #Concatenate all predicted chunks
             final_pred_abs = np.concatenate(full_prediction_abs, axis=0)
             final_pred_centered = np.concatenate(full_prediction_centered, axis=0)
             
             all_preds_saved.append(final_pred_abs)
             zeroed_output.append(final_pred_centered)
 
-                # time.sleep(2)
             if len(all_preds_saved) % 50 == 0:
                 print(f"Predicted {len(all_preds_saved)} windows so far...")
 
@@ -404,8 +396,6 @@ all_preds_saved = np.array(all_preds_saved)   # Shape (N, 25, 22, 3)
 folder_name = f"vel_model/{suffix}"
 # Create directory
 os.makedirs(folder_name, exist_ok=True)
-
-# Join path safely
 
 if extreme:
     suffix += f"_scale{SCALE_FACTOR}"

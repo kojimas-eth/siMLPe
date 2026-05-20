@@ -1,7 +1,12 @@
 import argparse
 import os, sys
 from scipy.spatial.transform import Rotation as R
-
+import os.path as osp
+dir_path = osp.dirname(osp.abspath(__file__))
+root_path = osp.abspath(osp.join(dir_path, '../../'))
+if root_path not in sys.path:
+    sys.path.append(root_path)
+    
 import numpy as np
 from config  import config
 from exps.baseline_h36m.model import siMLPe as Model
