@@ -1,105 +1,124 @@
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-class GlobalTrajectoryExtrapolator:
-    def __init__(self, dt=1.0/25.0):
+class KFTrajectoryExtrapolator:
+    def __init__(self, dt=1.0/15.0, ground_z=0.0):
         """
-        dt: Time step between frames (e.g., 1/25 for 25fps data)
+        dt: Time step between frames (1/15 for 15fps)
+        ground_z: The assumed height of the floor (default 0.0)
         """
         self.dt = dt
+        self.ground_z = ground_z
         
-        # State: [x, y, z, vx, vy, vz]
-        self.x = np.zeros((6, 1))
+        # ==========================================
+        # 1. POSITION KALMAN FILTER (2D Linear KF)
+        # State: [x, y, vx, vy]
+        # ==========================================
+        self.x_pos = np.zeros((4, 1))
+        self.P_pos = np.eye(4) * 500.0 # Uncertainty for first step
         
-        # State Covariance matrix
-        self.P = np.eye(6) * 500.0 
+        self.F_pos = np.eye(4)
+        self.F_pos[0, 2] = self.dt # x += vx * dt
+        self.F_pos[1, 3] = self.dt # y += vy * dt
         
-        # State Transition Matrix (Constant Velocity Model)
-        self.F = np.eye(6)
-        self.F[0, 3] = self.dt
-        self.F[1, 4] = self.dt
-        self.F[2, 5] = self.dt
+        self.H_pos = np.zeros((2, 4))
+        self.H_pos[0, 0] = 1.0
+        self.H_pos[1, 1] = 1.0
         
-        # Measurement Matrix (We only measure position [x, y, z])
-        self.H = np.zeros((3, 6))
-        self.H[0, 0] = 1
-        self.H[1, 1] = 1
-        self.H[2, 2] = 1
+        self.R_pos = np.eye(2) * 0.01  # ZED position noise (X, Y)
+        self.Q_pos = np.eye(4) * 0.5   # Target maneuverability
         
-        # Measurement Noise Covariance (How much we trust the ZED tracking)
-        self.R_noise = np.eye(3) * 0.01 
+        # ==========================================
+        # 2. ORIENTATION KALMAN FILTER (1D Linear KF)
+        # State: [yaw, yaw_velocity] 
+        # ==========================================
+        self.x_ori = np.zeros((2, 1))
+        self.P_ori = np.eye(2) * 10.0
         
-        # Process Noise Covariance (How much we expect the velocity to randomly change)
-        # Higher means the filter adapts faster to sudden stops/starts
-        q = 0.7 
-        self.Q = np.eye(6) * q
+        self.F_ori = np.eye(2)
+        self.F_ori[0, 1] = self.dt 
         
-        # Orientation state
-        self.last_quat = np.array([0, 0, 0, 1])
-        self.angular_velocity = np.zeros(3) # Rotation vector representation
+        self.H_ori = np.zeros((1, 2))
+        self.H_ori[0, 0] = 1.0 # We only measure yaw
         
+        self.R_ori = np.array([[0.05]]) # ZED orientation noise
+        self.Q_ori = np.array([[0.01, 0.0], 
+                               [0.0, 2.0]]) # [Yaw noise, Yaw Velocity noise]
+
+        self.initialized = False
+
     def update(self, observed_position, observed_quat):
-        """
-        Feed the current frame's global root position and orientation to the filter.
-        observed_position: shape (3,) -> [x, y, z]
-        observed_quat: shape (4,) -> [x, y, z, w]
-        """
-        # --- 1. Update Position Kalman Filter ---
-        z = np.array(observed_position).reshape(3, 1)
-        
-        # Predict Step
-        x_pred = self.F @ self.x
-        P_pred = self.F @ self.P @ self.F.T + self.Q
-        
-        # Update Step
-        y = z - (self.H @ x_pred) # Innovation
-        S = self.H @ P_pred @ self.H.T + self.R_noise
-        K = P_pred @ self.H.T @ np.linalg.inv(S) # Kalman Gain
-        
-        self.x = x_pred + (K @ y)
-        self.P = (np.eye(6) - (K @ self.H)) @ P_pred
-        
-        # --- 2. Update Orientation (Angular Velocity) ---
-        # Calculate rotation difference between current and last frame
-        r_curr = R.from_quat(observed_quat)
-        r_last = R.from_quat(self.last_quat)
-        
-        # r_diff represents the rotation from last frame to current frame
-        r_diff = r_curr * r_last.inv()
-        
-        # Convert to rotation vector (direction is axis, magnitude is angle)
-        # Divide by dt to get angular velocity
-        current_angular_vel = r_diff.as_rotvec() / self.dt
-        current_angular_vel[0] = 0.0 # Zero out X-axis rotation
-        current_angular_vel[2] = 0.0 # Zero out Z-axis rotation
+        # Extract Yaw (Y-axis) from quaternion
+        euler_angles = R.from_quat(observed_quat).as_euler('xyz')
+        yaw_meas = euler_angles[1] 
 
-        # Smooth the angular velocity (Simple Exponential Smoothing)
-        alpha = 0.6 # Smoothing factor (0.0 = completely ignore new, 1.0 = completely trust new)
-        self.angular_velocity = (alpha * current_angular_vel) + ((1 - alpha) * self.angular_velocity)
-        self.last_quat = observed_quat
+        # --- Initialize states on first frame ---
+        if not self.initialized:
+            self.x_pos[0:2, 0] = observed_position[0:2] # Take X and Y
+            self.x_ori[0, 0] = yaw_meas                 # Take Yaw
+            self.initialized = True
+            return
 
-    def predict_future(self, num_frames):
-        """
-        Extrapolates the trajectory `num_frames` into the future.
-        Returns:
-            future_positions: (num_frames, 3)
-            future_quats: (num_frames, 4)
-        """
+        # ==========================================
+        # UPDATE POSITION (2D Linear KF)
+        # ==========================================
+        z_pos = np.array(observed_position[0:2]).reshape(2, 1)
+        
+        x_pred_pos = self.F_pos @ self.x_pos
+        P_pred_pos = self.F_pos @ self.P_pos @ self.F_pos.T + self.Q_pos
+        
+        y_pos = z_pos - (self.H_pos @ x_pred_pos)
+        S_pos = self.H_pos @ P_pred_pos @ self.H_pos.T + self.R_pos
+        K_pos = P_pred_pos @ self.H_pos.T @ np.linalg.inv(S_pos)
+        
+        self.x_pos = x_pred_pos + (K_pos @ y_pos)
+        self.P_pos = (np.eye(4) - (K_pos @ self.H_pos)) @ P_pred_pos
+
+        # ==========================================
+        # UPDATE ORIENTATION (1D Linear KF)
+        # ==========================================
+        z_ori = np.array([[yaw_meas]])
+        
+        x_pred_ori = self.F_ori @ self.x_ori
+        P_pred_ori = self.F_ori @ self.P_ori @ self.F_ori.T + self.Q_ori
+        
+        y_ori = z_ori - (self.H_ori @ x_pred_ori)
+        
+        # Angle Wrapping: Force residual to be between -pi and pi
+        # This prevents the filter from freaking out when crossing 180 degrees
+        y_ori[0, 0] = (y_ori[0, 0] + np.pi) % (2 * np.pi) - np.pi
+        
+        S_ori = self.H_ori @ P_pred_ori @ self.H_ori.T + self.R_ori
+        K_ori = P_pred_ori @ self.H_ori.T @ np.linalg.inv(S_ori)
+        
+        self.x_ori = x_pred_ori + (K_ori @ y_ori)
+        self.P_ori = (np.eye(2) - (K_ori @ self.H_ori)) @ P_pred_ori
+
+    def predict_future(self, num_frames, damping=0.9):
         future_positions = []
         future_quats = []
         
-        current_x = self.x.copy()
-        current_r = R.from_quat(self.last_quat)
+        current_x_pos = self.x_pos.copy()
+        current_x_ori = self.x_ori.copy()
         
-        for _ in range(num_frames):
-            # Predict next position using KF transition matrix
-            current_x = self.F @ current_x
-            future_positions.append(current_x[:3, 0])
+        # Ignore micro-jitters in rotational velocity
+        if abs(current_x_ori[1, 0]) < 0.05:
+            current_x_ori[1, 0] = 0.0
             
-            # Predict next orientation using smoothed angular velocity
-            # rotation to apply = angular_velocity * dt
-            step_rot = R.from_rotvec(self.angular_velocity * self.dt)
-            current_r = step_rot * current_r
-            future_quats.append(current_r.as_quat())
+        for _ in range(num_frames):
+            # --- Predict Position (2D) ---
+            current_x_pos = self.F_pos @ current_x_pos
+            
+            # Reconstruct 3D position (inject locked ground_z)
+            pos_3d = np.array([current_x_pos[0, 0], current_x_pos[1, 0], self.ground_z])
+            future_positions.append(pos_3d)
+            
+            # --- Predict Orientation (1D Yaw) ---
+            current_x_ori = self.F_ori @ current_x_ori
+            current_x_ori[1, 0] *= damping # Apply friction to angular velocity
+            
+            # Reconstruct 3D quaternion (Pitch and Roll are locked to 0)
+            step_quat = R.from_euler('xyz', [0.0, current_x_ori[0, 0], 0.0]).as_quat()
+            future_quats.append(step_quat)
             
         return np.array(future_positions), np.array(future_quats)

@@ -6,10 +6,10 @@ import numpy as np
 import json
 import copy
 
-
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-# 1. Get the path of the current file
+
+#solve dir issues
 current_file = Path(__file__).resolve()
 project_root = current_file.parent.parent.parent
 if str(project_root) not in sys.path:
@@ -28,17 +28,12 @@ parser.add_argument('--num', type=int, default=64, help='=num of blocks')
 parser.add_argument('--weight', type=float, default=1., help='=loss weight')
 
 args = parser.parse_args()
-# torch.use_deterministic_algorithms(True)
 acc_log = open(args.exp_name, 'a')
-# torch.manual_seed(args.seed)
 writer = SummaryWriter()
 acc_log.write(''.join('Seed : ' + str(args.seed) + '\n'))
 
 from exps.baseline_h36m.model import siMLPe as Model
 from exps.baseline_h36m.train import get_dct_matrix , gen_velocity
-
-
-
 from config import config
 config.motion.h36m_target_length = config.motion.h36m_target_length_train
 
@@ -104,11 +99,11 @@ def train_step(h36m_motion_input, h36m_motion_target, model, optimizer, nb_iter,
 
     return loss.item(), optimizer, current_lr
 
-# 1. Initialize Model
+#Initialize Model
 model = Model(config)
 model.cuda()
 
-# 2. Load Pretrained Weights
+#Load Pretrained Weights
 if config.model_pth is not None:
     print(f"Loading pretrained model from {config.model_pth}")
     state_dict = torch.load(config.model_pth, weights_only=True, map_location="cpu")
@@ -134,7 +129,7 @@ if config.model_pth is not None:
 else:
     print("WARNING: No pretrained model path specified in config. Training from scratch.")
 
-# 3. Setup ZED Dataset
+#Setup ZED Dataset
 dataset = ZEDDataset(config, 'train', data_aug=True)
 dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True, drop_last=True)
 
@@ -144,10 +139,10 @@ eval_dataset = ZEDDataset(eval_config, 'test', data_aug = False)
 eval_dataloader = DataLoader(eval_dataset, batch_size=config.batch_size, shuffle=False, drop_last=True)
 
 
-# 4. Optimizer (Fine-tuning usually requires smaller LR, set in config)
+# Optimizer (Fine-tuning usually requires smaller LR, set in config)
 optimizer = torch.optim.Adam(model.parameters(), lr=config.cos_lr_max, weight_decay=config.weight_decay)
 
-# 5. Training Loop
+# Training Loop
 model.train()
 nb_iter = 0
 
@@ -186,7 +181,6 @@ while nb_iter < config.cos_lr_total_iters:
                     
                     if config.deriv_output:
                         offset = val_input[:, -1:].cuda()
-                        # Use 'n' instead of config.motion.h36m_target_length_eval
                         val_pred = val_pred[:, :n] + offset
                     else:
                         val_pred = val_pred[:, :n]
