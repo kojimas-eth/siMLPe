@@ -306,74 +306,6 @@ def plot_trajectory_h36m(vis_input, vis_target, vis_pred,highlight_frame=24):
     ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.05, 0.8), borderaxespad=0.)
     plt.show()
 
-def plot_trajectory_zed(vis_input, vis_target, vis_pred,plot_length=10, highlight_frame=10):
-    fig = plt.figure(figsize=(14,8))
-    ax = fig.add_subplot(projection='3d')
-    error_summary = []
-    # # Plot Input Trajectory
-    for frame in range(vis_input.shape[0]):
-        xs = vis_input[frame,:,0]
-        ys = vis_input[frame,:,2] #flip
-        zs = vis_input[frame,:,1]
-
-        for p1, p2 in SKELETON_EDGES_22:
-            if frame == vis_input.shape[0]-1:
-                ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color='blue', alpha=0.5, linewidth=1)
-            else:
-                ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color='blue', alpha=0.1,linewidth=0.5)
-        
-    # # Plot Target Trajectory
-    for frame in range(plot_length+1):
-        xs = vis_target[frame,:,0]
-        ys = vis_target[frame,:,2]
-        zs = vis_target[frame,:,1]
-
-        for p1, p2 in SKELETON_EDGES_22:
-            if frame == highlight_frame:
-                ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color='green', alpha=0.5, linewidth=1)
-            else:
-                ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color='green', alpha=0.1,linewidth=0.5)
-
-    # Plot Predicted Trajectory
-    for frame in range(plot_length+1):
-        xs = vis_pred[frame,:,0]
-        ys = vis_pred[frame,:,2]
-        zs = vis_pred[frame,:,1]
-
-        for p1, p2 in SKELETON_EDGES_22:
-            if frame == highlight_frame:
-                ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color='red', alpha=0.5, linewidth=1)
-            else:
-                ax.plot([xs[p1], xs[p2]], [ys[p1], ys[p2]], [zs[p1], zs[p2]], color='red', alpha=0.1,linewidth=0.5)
-
-    for err_frame in frames_to_compute_error:
-            mpjpe = compute_mpjpe(vis_pred[err_frame], vis_target[err_frame])
-            error_summary.append(f"T+{err_frame+1}: {mpjpe:.2f}m")
-
-    ax.legend()
-    ax.set_xlabel('X (Lateral)')
-    ax.set_ylabel('Y (Depth)')
-    ax.set_zlabel('Z (Height)')
-    if root:
-        ax.set_title(f'Studying frame {sample} with bodies zeroed')
-    else:
-        ax.set_title(f'Studying frame {sample} with displacement interpolated')
-
-    legend_elements = [
-    Line2D([0], [0], color='blue', lw=2, label='Past Frame (History)'),
-    Line2D([0], [0], color='green', lw=2, label='Ground Truth (Real)'),
-    Line2D([0], [0], color='red', lw=2, label='Prediction (Model)') ]
-
-    info_text = f"Prediction Errors (MPJPE):\n" + "\n".join(error_summary)
-    
-    fig.text(0.75, 0.60, info_text, 
-             fontsize=10, 
-             verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
-    
-    # Add the legend to the plot
-    ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.05, 0.8), borderaxespad=0.)
-    plt.show()
 
 def plot_entire_sequence(input,frames_to_plot):
     fig = plt.figure(figsize=(14,8))
@@ -989,18 +921,17 @@ def animate_multiple_pred_together(vis_input, vis_target, vis_preds, skeleton_ed
 # MAIN CODE
 ##################################
 zed = True #If using data from zed
-root = True #If using data with everything zeroed
+root = False #If using data with everything zeroed
 second_data = False #If you want to load a second set of data to compare (e.g. finetune vs original)
-prefix = "fix_finetune" #"KF", "original", "finetune"
+prefix = "original" # ex. "KF", "original", "finetune"
 source_number = "1"
-source_file = f"moving_arm_{source_number}_{prefix}" #Rememeber to change data load if using simple prediction!
-sample = 0 #which frame to analyze
+source_file = f"test_{source_number}_{prefix}"
+sample = 20 #which frame to analyze
 pred_length = 60
 
 if zed:
     data = np.load(f"predictions_fix/{prefix}/{source_file}.npz")
-    # data = np.load(f"../zed_finetune/predictions/KF/{source_file}.npz")
-    # data = np.load("sanity_check.npz")
+    # data = np.load(f"vel_model/vel/{source_file}.npz")
     print(f"Loaded {len(data['inputs'])} samples from zed_inference_results_{source_file}.npz")
 else:
     data = np.load("results_dump.npz")
@@ -1012,11 +943,6 @@ frames_to_compute_error = [0, 3, 5, 9]
 if zed:
     inputs = data['inputs']   # (Total Sample, 50, 22, 3)
     preds = data['preds']     # (Total Sample, pred length, 22, 3)
-    print("The shapes of input, preds and target are",inputs.shape, preds.shape)
-
-    #Target specifically the sanity_check
-    # targets = preds
-    # vis_target = targets[0]
 
 
 else:
@@ -1027,14 +953,12 @@ else:
     vis_target= targets[sample] # (25, 32, 3)
 
 
-
 input_time = inputs.shape[1]
 pred_time = preds.shape[1]
 num_joints = inputs.shape[2]
 print("pred shape",preds.shape)
 print("The shapes of input pred and joints are",input_time, pred_time, num_joints)
-print(f"The distance between neck and hips in input is {inputs[0,0,0,:]-inputs[0,0,1,:]}")
-print(f"The distance between knee and ankle in pred is {preds[0,0,0,:]-preds[0,0,1,:]}")
+
 if root:
     inputs = data['zero_input']   # (N, 50, 22, 3)
     preds = data['zero_output'] # (N, 25, 22, 3)
@@ -1048,69 +972,33 @@ else:
 
 """Handle the case where prediction length is longer than 50 frames for ground truth"""
 total_samples = inputs.shape[0]
-
-# 1. Simple Case: Prediction is shorter than input window
-if pred_length <= input_time:
-    target_start_idx = sample + input_time
     
-    if target_start_idx < total_samples:
-        vis_target = inputs[target_start_idx, :pred_length, :, :]
-    else:
-        print("End of dataset reached, cannot fetch GT.")
-        vis_target = np.zeros((pred_length, 22, 3)) 
+target_start_idx = sample + 1
+target_end_idx = sample + 1 + pred_length
 
-# 2. Complex Case: Prediction is longer than input window (Stitching)
+if target_end_idx <= total_samples:
+    # Extract the chronologically newest frame from the next 'pred_length' windows
+    vis_target = inputs[target_start_idx:target_end_idx, -1, :, :]
 else:
-    num_full_windows = math.floor(pred_length / input_time)
-    remainder = pred_length % input_time
+    # Handle the edge case where prediction extends beyond available data
+    available_frames = total_samples - target_start_idx
+    vis_target = np.zeros((pred_length, num_joints, 3))
     
-    target_chunks = []
-    
-    # A. Collect full 50-frame windows
-    for i in range(num_full_windows):
-        idx = sample + input_time + (i * input_time)
+    if available_frames > 0:
+        vis_target[:available_frames] = inputs[target_start_idx:total_samples, -1, :, :]
         
-        if idx < total_samples:
-            target_chunks.append(inputs[idx, :, :, :]) 
-        else:
-            target_chunks.append(np.zeros((50, 22, 3))) # Padding if end of file
-            
-    # B. Collect the remainder (if any)
-    # if remainder > 0:
-    #     idx = sample + input_time + (num_full_windows * input_time)
+    print(f"Warning: Reached end of dataset. Padded last {pred_length - available_frames} frames with zeros.")
 
-    #     if idx < total_samples:
-    #         # Take the FIRST 'remainder' frames of this window
-    #         target_chunks.append(inputs[idx, :remainder, :, :]) 
-    #     else:
-    #         target_chunks.append(np.zeros((remainder, 22, 3)))
-    #         print("No more datasets available, resulting to 0s")
-
-    if remainder > 0:
-        idx = sample + remainder + (num_full_windows * input_time)
-
-        if idx < total_samples:
-            # Take the LAST 'remainder' frames of this window
-            target_chunks.append(inputs[idx, -remainder:, :, :]) 
-        else:
-            target_chunks.append(np.zeros((remainder, 22, 3)))
-            print("No more datasets available, resulting to 0s")
-    # C. Stitch them together
-    vis_target = np.concatenate(target_chunks, axis=0)
-
-# Final shape check
 print(f"Target Shape: {vis_target.shape}") # Should be (pred_length, 22, 3)
 
 
 ###### Now load 2nd Data #######
 if second_data:
     prefix2 = "fix_original" #"fix_original", "original", "finetune"
-    source_file2 = f"test_{source_number}_{prefix2}" #Rememeber to change data load if using simple prediction!
+    source_file2 = f"test_{source_number}_{prefix2}" 
 
     if zed:
         data2 = np.load(f"predictions_fix/{prefix2}/{source_file2}.npz")
-        # data = np.load(f"../zed_finetune/predictions/KF/{source_file}.npz")
-        # data = np.load("sanity_check.npz")
         print(f"Loaded {len(data2['inputs'])} samples from zed_inference_results_{source_file2}.npz")
     else:
         data2 = np.load("results_dump.npz")
@@ -1121,7 +1009,7 @@ if second_data:
     if zed:
         inputs2 = data2['inputs']   # (Total Sample, 50, 22, 3)
         preds2 = data2['preds']     # (Total Sample, pred length, 22, 3)
-        print("The shapes of input, preds and target are",inputs2.shape, preds2.shape)
+
     if root:
         inputs2 = data2['zero_input']   # (N, 50, 22, 3)
         preds2 = data2['zero_output'] # (N, 25, 22, 3)
@@ -1136,8 +1024,6 @@ if second_data:
 
 
 ###### Create Animation of specific frame and create plot of all 22 joints ###### 
-
-
 if second_data:
     animate_multiple_pred_together(
         vis_input, 
@@ -1150,6 +1036,9 @@ if second_data:
     )
 else:
     animate_trajectory_zed_together(vis_input, vis_target, vis_pred, SKELETON_EDGES_22, source_file=source_file, sample=sample, root=root)
+
+
+'''Other Plotting codes you can use for analysis (uncomment to run)'''
 # plot_2d_trajectory_separated(vis_input,vis_target, vis_pred, sample)
 # plot_prediction_error(vis_input, vis_pred, vis_target)
 

@@ -113,7 +113,11 @@ def get_predictor_error_stats(search_folder,  part):
             # C. Stitch them together
             vis_target = np.concatenate(target_chunks, axis=0)
 
-        # Save the errors from each loop
+        ###### IF INTERESTED IN ONLY HAND ############
+        # target_joint_idx = 21
+        # error = vis_pred[:, target_joint_idx, :] - vis_target[:, target_joint_idx, :]
+        # error_per_frame = np.linalg.norm(error, axis=-1)
+
         error = vis_pred - vis_target
         dist_error = np.linalg.norm(error, axis=-1)  # Shape: (Frames, Joints)
         error_per_frame = np.mean(dist_error, axis=-1)  # Shape: (Frames,)
@@ -141,7 +145,7 @@ output_folder.mkdir(parents=True, exist_ok=True)
 
 # Define common variables
 interpolate = True
-part = "moving"
+part = "arm_landing" #arm, moving (moving camera)
 
 # Define predictor 1
 prefix_1 = "fix_finetune"
